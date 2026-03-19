@@ -1,0 +1,22 @@
+# Build output
+src/bin/
+src/obj/
+
+# Dalamud auto-generated assembly info
+*.AssemblyInfo.cs
+*.AssemblyAttributes.cs
+
+# Session data (user-specific, not committed)
+*.json
+!DamageMeter.json
+
+# Claude context files (never committed per project rules)
+CLAUDE.md
+
+# IDE / OS
+.vs/
+.vscode/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
