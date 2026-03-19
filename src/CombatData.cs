@@ -4,6 +4,8 @@ using System.Linq;
 
 namespace DamageMeter;
 
+// ── Enums ─────────────────────────────────────────────────────────────────────
+
 public enum MeterType
 {
     DamageDealt,
@@ -19,40 +21,90 @@ public static class MeterTypeExtensions
 {
     public static string DisplayName(this MeterType m) => m switch
     {
-        MeterType.DamageDealt         => "Damage Dealt",
-        MeterType.DPS                 => "DPS",
-        MeterType.HealingDone         => "Healing Done",
-        MeterType.HPS                 => "HPS",
-        MeterType.Overhealing         => "Overhealing",
-        MeterType.DamageTaken         => "Damage Taken",
+        MeterType.DamageDealt          => "Damage Dealt",
+        MeterType.DPS                  => "DPS",
+        MeterType.HealingDone          => "Healing Done",
+        MeterType.HPS                  => "HPS",
+        MeterType.Overhealing          => "Overhealing",
+        MeterType.DamageTaken          => "Damage Taken",
         MeterType.AvoidableDamageTaken => "Avoidable Dmg Taken",
-        _                             => m.ToString()
+        _                              => m.ToString()
     };
 }
 
-/// <summary>
-/// Stores all combat data for a single combatant over one fight.
-/// </summary>
+public enum CombatantType
+{
+    PartyMember,    // In the player's current party (IPartyList)
+    FriendlyPlayer, // Player character not in party (alliance, bystander)
+    Enemy,          // NPC / monster
+    Unknown
+}
+
+// ── Per-ability stats ─────────────────────────────────────────────────────────
+
+/// <summary>Tracks damage or healing done by a single ability.</summary>
+[Serializable]
+public class AbilityStats
+{
+    public uint   ActionId    { get; set; }
+    public string Name        { get; set; } = "";
+    public long   TotalAmount { get; set; }
+    public long   TotalOverheal { get; set; } // meaningful for healing entries only
+    public int    Hits        { get; set; }
+    public long   MinHit      { get; set; }   // set on first hit
+    public long   MaxHit      { get; set; }
+
+    [Newtonsoft.Json.JsonIgnore]
+    public double Average => Hits > 0 ? (double)TotalAmount / Hits : 0;
+
+    [Newtonsoft.Json.JsonIgnore]
+    public double OverhealPercent =>
+        (TotalAmount + TotalOverheal) > 0
+            ? (double)TotalOverheal / (TotalAmount + TotalOverheal) * 100
+            : 0;
+
+    public void Record(long amount, long overheal = 0)
+    {
+        TotalAmount  += amount;
+        TotalOverheal += overheal;
+        Hits++;
+        MinHit = Hits == 1 ? amount : Math.Min(MinHit, amount);
+        MaxHit = Math.Max(MaxHit, amount);
+    }
+}
+
+// ── Per-combatant data ────────────────────────────────────────────────────────
+
+/// <summary>All combat data for one entity over one fight.</summary>
 [Serializable]
 public class CombatantData
 {
-    public uint   EntityId   { get; set; }
-    public string Name       { get; set; } = "";
-    public string World      { get; set; } = "";
-    public byte   ClassJobId { get; set; }
+    public uint          EntityId   { get; set; }
+    public string        Name       { get; set; } = "";
+    public string        World      { get; set; } = "";
+    public byte          ClassJobId { get; set; }
+    public CombatantType Type       { get; set; } = CombatantType.Unknown;
 
-    // Totals
+    // ── Totals ────────────────────────────────────────────────────────────────
     public long TotalDamageDealt          { get; set; }
     public long TotalHealingDone          { get; set; }
     public long TotalOverhealingDone      { get; set; }
     public long TotalDamageTaken          { get; set; }
-    public long TotalAvoidableDamageTaken { get; set; } // proxy: AoE hits (3+ targets)
+    public long TotalAvoidableDamageTaken { get; set; }
 
-    // Event log for DPS/HPS calculations (timestamp = ticks since combat start)
+    // ── Per-ability breakdown ─────────────────────────────────────────────────
+    /// Abilities this entity used to deal damage (keyed by ActionId).
+    public Dictionary<uint, AbilityStats> DamageByAbility     { get; set; } = new();
+    /// Abilities this entity used to heal (keyed by ActionId).
+    public Dictionary<uint, AbilityStats> HealingByAbility    { get; set; } = new();
+    /// Abilities that hit this entity (keyed by ActionId of the incoming attack).
+    public Dictionary<uint, AbilityStats> DamageTakenByAbility { get; set; } = new();
+
+    // ── Event log for DPS/HPS curves ─────────────────────────────────────────
     public List<(long TickMs, long Amount)> DamageEvents  { get; set; } = new();
     public List<(long TickMs, long Amount)> HealingEvents { get; set; } = new();
 
-    // Display helpers
+    // ── Computed ──────────────────────────────────────────────────────────────
     public string DisplayName(bool showServer, bool initialsOnly)
     {
         var name = initialsOnly ? Initials(Name) : Name;
@@ -67,15 +119,12 @@ public class CombatantData
         return fullName.Length > 0 ? $"{fullName[0]}." : fullName;
     }
 
-    /// <summary>Returns DPS over the duration of the combat (seconds).</summary>
     public double GetDps(double durationSeconds)
         => durationSeconds > 0 ? TotalDamageDealt / durationSeconds : 0;
 
-    /// <summary>Returns HPS over the duration of the combat (seconds).</summary>
     public double GetHps(double durationSeconds)
         => durationSeconds > 0 ? TotalHealingDone / durationSeconds : 0;
 
-    /// <summary>Returns the value for the given meter type.</summary>
     public long GetValue(MeterType type, double durationSeconds) => type switch
     {
         MeterType.DamageDealt          => TotalDamageDealt,
@@ -89,18 +138,17 @@ public class CombatantData
     };
 }
 
-/// <summary>
-/// A single combat session (one pull/fight).
-/// </summary>
+// ── Session ───────────────────────────────────────────────────────────────────
+
+/// <summary>One combat encounter (start → end).</summary>
 [Serializable]
 public class CombatSession
 {
-    // ID format: ZoneName_yyyy-MM-dd_HH-mm-ss
-    public string   Id        { get; set; } = "";
-    public string   ZoneName  { get; set; } = "Unknown Zone";
-    public DateTime StartTime { get; set; } = DateTime.UtcNow;
-    public DateTime? EndTime  { get; set; }
-    public bool     IsSaved   { get; set; } // manually saved = permanent
+    public string    Id        { get; set; } = "";
+    public string    ZoneName  { get; set; } = "Unknown Zone";
+    public DateTime  StartTime { get; set; } = DateTime.UtcNow;
+    public DateTime? EndTime   { get; set; }
+    public bool      IsSaved   { get; set; }
 
     public Dictionary<uint, CombatantData> Combatants { get; set; } = new();
 
@@ -120,11 +168,10 @@ public class CombatSession
         }
     }
 
-    /// <summary>Sum of a meter value across all combatants (for percentage calculation).</summary>
     public long GetTotal(MeterType type)
         => Combatants.Values.Sum(c => c.GetValue(type, DurationSeconds));
 
-    /// <summary>Returns combatants sorted descending by the selected meter value.</summary>
+    /// <summary>Returns combatants of all types sorted descending by value.</summary>
     public List<CombatantData> GetSortedCombatants(MeterType type)
     {
         var dur = DurationSeconds;
@@ -133,19 +180,28 @@ public class CombatSession
             .ToList();
     }
 
-    public static string MakeId(string zoneName, DateTime dt)
-        => $"{SanitizeName(zoneName)}_{dt:yyyy-MM-dd_HH-mm-ss}";
+    /// <summary>Returns combatants filtered to one type, sorted descending.</summary>
+    public List<CombatantData> GetSortedByType(MeterType type, CombatantType ctype)
+    {
+        var dur = DurationSeconds;
+        return Combatants.Values
+            .Where(c => c.Type == ctype)
+            .OrderByDescending(c => c.GetValue(type, dur))
+            .ToList();
+    }
 
-    private static string SanitizeName(string name)
+    public static string MakeId(string zoneName, DateTime dt)
+        => $"{Sanitize(zoneName)}_{dt:yyyy-MM-dd_HH-mm-ss}";
+
+    private static string Sanitize(string name)
         => string.Concat(name.Where(c => char.IsLetterOrDigit(c) || c == '_')).Replace(" ", "_");
 }
 
-/// <summary>Container for all persisted sessions.</summary>
+// ── Store ─────────────────────────────────────────────────────────────────────
+
 [Serializable]
 public class SessionStore
 {
-    /// <summary>Temporary sessions (oldest pruned when over MaxTemp).</summary>
     public List<CombatSession> TempSessions  { get; set; } = new();
-    /// <summary>Manually saved sessions (never pruned automatically).</summary>
     public List<CombatSession> SavedSessions { get; set; } = new();
 }

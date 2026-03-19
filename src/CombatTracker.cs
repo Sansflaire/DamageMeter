@@ -20,77 +20,72 @@ namespace DamageMeter;
 
 /// <summary>
 /// Core combat-tracking service.
-/// Hooks ReceiveActionEffect to capture damage/healing events in real time,
-/// manages session lifecycle (start on InCombat, end when combat drops),
-/// and persists sessions to JSON.
+/// Hooks ReceiveActionEffect to capture damage/healing events, manages session
+/// lifecycle, categorises combatants (party / friendly / enemy), and tracks
+/// per-ability breakdowns for the detail popup.
 /// </summary>
 public sealed class CombatTracker : IDisposable
 {
-    // ── FFXIV ActionEffect hook ───────────────────────────────────────────────
+    // ── ActionEffect hook ─────────────────────────────────────────────────────
     //
-    // Layout of each 8-byte ActionEffect entry (unchanged since Stormblood):
-    //   [0] Type   (byte)  — see EffectKind below
-    //   [1] Param0 (byte)  — damage sub-type / context
-    //   [2] Param1 (byte)
-    //   [3] Param2 (byte)
-    //   [4] Param3 (byte)  — high byte for extended values (> 65535)
-    //   [5] Param4 (byte)
-    //   [6] Flags  (byte)  — bit 0x40 = extend Param3 into high 8 bits of value
-    //   [7] Flags2 (byte)  — additional effect flags
-    // Value (ushort) is stored at bytes 6-7 in some versions; verify against
-    // current FFXIVClientStructs if damage numbers look wrong.
-    //
-    // TODO: If damage numbers appear incorrect after a major patch, cross-reference
-    // the ActionEffect struct layout with FFXIVClientStructs source on GitHub.
+    // Raw ActionEffect entry — 8 bytes per effect, layout:
+    //   [0] Type   (EffectKind below)
+    //   [1] Param0
+    //   [2] Param1
+    //   [3] Param2
+    //   [4] Param3 — high byte for extended values (damage > 65 535)
+    //   [5] Param4
+    //   [6] Flags  — bit 0x40 = extend value via Param3
+    //   [7] Flags2
+    // Value ushort = bytes [6..7]; extended = value | (Param3 << 16) when Flags & 0x40.
+    // TODO: re-verify layout against FFXIVClientStructs after major game patches.
 
-    private const int EffectSize       = 8;  // bytes per ActionEffect entry
-    private const int EffectsPerTarget = 8;  // max effects per target per packet
+    private const int EffectSize       = 8;
+    private const int EffectsPerTarget = 8;
 
-    // Effect type bytes — verify against ActionEffectType in FFXIVClientStructs
     private enum EffectKind : byte
     {
-        Nothing          = 0,
-        Miss             = 1,
-        FullResist       = 2,
-        Damage           = 3,
-        BlockedDamage    = 4,
-        ParriedDamage    = 5,
-        Invulnerable     = 6,
-        OtherDamage      = 11,  // e.g. fall, DoT ticks in some versions
-        Heal             = 14,
-        // TODO: verify these values match the installed FFXIVClientStructs
+        Nothing       = 0,
+        Miss          = 1,
+        FullResist    = 2,
+        Damage        = 3,
+        BlockedDamage = 4,
+        ParriedDamage = 5,
+        Invulnerable  = 6,
+        OtherDamage   = 11,
+        Heal          = 14,
     }
 
     private unsafe delegate void ReceiveActionEffectDelegate(
-        uint                              casterEntityId,
-        Character*                        casterPtr,
-        Vector3*                          targetPos,
-        ActionEffectHandler.Header*       header,
+        uint                               casterEntityId,
+        Character*                         casterPtr,
+        Vector3*                           targetPos,
+        ActionEffectHandler.Header*        header,
         ActionEffectHandler.TargetEffects* effects,
-        GameObjectId*                     targetEntityIds);
+        GameObjectId*                      targetEntityIds);
 
     private Hook<ReceiveActionEffectDelegate>? _hook;
 
     // ── Services ──────────────────────────────────────────────────────────────
-    private readonly IPluginLog    _log;
-    private readonly ICondition    _condition;
-    private readonly IObjectTable  _objectTable;
-    private readonly IClientState  _clientState;
-    private readonly IFramework    _framework;
-    private readonly IDataManager  _dataManager;
+    private readonly IPluginLog   _log;
+    private readonly ICondition   _condition;
+    private readonly IObjectTable _objectTable;
+    private readonly IClientState _clientState;
+    private readonly IFramework   _framework;
+    private readonly IDataManager _dataManager;
+    private readonly IPartyList   _partyList;
 
     // ── State ─────────────────────────────────────────────────────────────────
-    private bool _wasInCombat;
+    private bool          _wasInCombat;
     private readonly Configuration _config;
     private readonly string        _storePath;
 
-    /// <summary>Currently active session, or null when out of combat.</summary>
+    // Action name cache: looked up from Lumina on first encounter
+    private readonly Dictionary<uint, string> _actionNames = new();
+
     public CombatSession? ActiveSession { get; private set; }
+    public SessionStore   Store         { get; private set; } = new();
 
-    /// <summary>All persisted sessions (temp + saved).</summary>
-    public SessionStore Store { get; private set; } = new();
-
-    // ── Events ────────────────────────────────────────────────────────────────
     public event Action<CombatSession>? OnSessionStarted;
     public event Action<CombatSession>? OnSessionEnded;
 
@@ -103,6 +98,7 @@ public sealed class CombatTracker : IDisposable
         IClientState         clientState,
         IFramework           framework,
         IDataManager         dataManager,
+        IPartyList           partyList,
         Configuration        config,
         string               configDir)
     {
@@ -112,6 +108,7 @@ public sealed class CombatTracker : IDisposable
         _clientState = clientState;
         _framework   = framework;
         _dataManager = dataManager;
+        _partyList   = partyList;
         _config      = config;
         _storePath   = Path.Combine(configDir, "sessions.json");
 
@@ -133,39 +130,31 @@ public sealed class CombatTracker : IDisposable
     private void OnFrameworkUpdate(IFramework fw)
     {
         var inCombat = _condition[ConditionFlag.InCombat];
-
-        if (inCombat && !_wasInCombat)
-            StartSession();
-
-        if (!inCombat && _wasInCombat)
-            EndSession();
-
+        if (inCombat && !_wasInCombat) StartSession();
+        if (!inCombat && _wasInCombat) EndSession();
         _wasInCombat = inCombat;
     }
 
     // ── Session lifecycle ─────────────────────────────────────────────────────
     private void StartSession()
     {
-        var zone     = GetZoneName();
-        var now      = DateTime.UtcNow;
-        var session  = new CombatSession
+        var zone    = GetZoneName();
+        var now     = DateTime.UtcNow;
+        ActiveSession = new CombatSession
         {
             Id        = CombatSession.MakeId(zone, now),
             ZoneName  = zone,
             StartTime = now,
         };
-        ActiveSession = session;
-        _log.Info($"DamageMeter: Combat started — {session.Id}");
-        OnSessionStarted?.Invoke(session);
+        _log.Info($"DamageMeter: Combat started — {ActiveSession.Id}");
+        OnSessionStarted?.Invoke(ActiveSession);
     }
 
     private void EndSession()
     {
         if (ActiveSession == null) return;
-
         ActiveSession.EndTime = DateTime.UtcNow;
 
-        // Skip trivially short pulls (< 3 seconds)
         if (ActiveSession.DurationSeconds >= 3.0 && ActiveSession.Combatants.Count > 0)
         {
             Store.TempSessions.Add(ActiveSession);
@@ -184,14 +173,14 @@ public sealed class CombatTracker : IDisposable
             Store.TempSessions.RemoveAt(0);
     }
 
-    // ── Action effect hook ────────────────────────────────────────────────────
+    // ── ActionEffect hook ─────────────────────────────────────────────────────
     private unsafe void OnReceiveActionEffect(
-        uint                              casterEntityId,
-        Character*                        casterPtr,
-        Vector3*                          targetPos,
-        ActionEffectHandler.Header*       header,
+        uint                               casterEntityId,
+        Character*                         casterPtr,
+        Vector3*                           targetPos,
+        ActionEffectHandler.Header*        header,
         ActionEffectHandler.TargetEffects* effects,
-        GameObjectId*                     targetEntityIds)
+        GameObjectId*                      targetEntityIds)
     {
         try
         {
@@ -209,20 +198,21 @@ public sealed class CombatTracker : IDisposable
     }
 
     private unsafe void ProcessEffects(
-        uint                              casterEntityId,
-        Character*                        casterPtr,
-        ActionEffectHandler.Header*       header,
+        uint                               casterEntityId,
+        Character*                         casterPtr,
+        ActionEffectHandler.Header*        header,
         ActionEffectHandler.TargetEffects* effects,
-        GameObjectId*                     targetEntityIds)
+        GameObjectId*                      targetEntityIds)
     {
         if (ActiveSession == null) return;
 
-        var numTargets   = header->NumTargets;
-        var isAoe        = numTargets >= 3; // proxy for "avoidable" AoE
-        var tickMs       = (long)(DateTime.UtcNow - ActiveSession.StartTime).TotalMilliseconds;
-        var casterData   = GetOrCreateCombatant(ActiveSession, casterEntityId, casterPtr);
+        var numTargets = header->NumTargets;
+        var actionId   = header->ActionId;
+        var isAoe      = numTargets >= 3;
+        var tickMs     = (long)(DateTime.UtcNow - ActiveSession.StartTime).TotalMilliseconds;
+        var casterData = GetOrCreateCombatant(ActiveSession, casterEntityId, casterPtr);
+        var actionName = GetActionName(actionId);
 
-        // Pointer to the first TargetEffects (each is 8 * 8 = 64 bytes)
         var effectsBase = (byte*)effects;
 
         for (int t = 0; t < numTargets && t < 32; t++)
@@ -235,18 +225,12 @@ public sealed class CombatTracker : IDisposable
 
             for (int e = 0; e < EffectsPerTarget; e++)
             {
-                var effPtr  = targetEffBase + e * EffectSize;
-                var kind    = (EffectKind)effPtr[0];
-                var param3  = effPtr[4]; // high byte for extended value
-                var flags   = effPtr[6];
-                // Value: ushort at bytes [6..7]
-                // Note: in FFXIV post-Shadowbringers the value ushort sits at offset 6.
-                // Some community parsers find it at offset 7 on certain patch versions.
-                // TODO: verify if numbers look wrong after a game patch.
-                var valueLo = *(ushort*)(effPtr + 6);
-                var value   = (long)valueLo;
+                var effPtr = targetEffBase + e * EffectSize;
+                var kind   = (EffectKind)effPtr[0];
+                var param3 = effPtr[4];
+                var flags  = effPtr[6];
+                var value  = (long)*(ushort*)(effPtr + 6);
 
-                // Extend to >65535 via Param3 when the extend flag (0x40) is set
                 if ((flags & 0x40) != 0)
                     value += (long)param3 << 16;
 
@@ -258,35 +242,65 @@ public sealed class CombatTracker : IDisposable
                     case EffectKind.BlockedDamage:
                     case EffectKind.ParriedDamage:
                     case EffectKind.OtherDamage:
-                        // Caster deals damage to target
                         if (casterData != null)
                         {
                             casterData.TotalDamageDealt += value;
                             casterData.DamageEvents.Add((tickMs, value));
+                            RecordAbility(casterData.DamageByAbility, actionId, actionName, value);
                         }
-                        // Target takes damage
                         if (targetData != null)
                         {
                             targetData.TotalDamageTaken += value;
-                            if (isAoe)
-                                targetData.TotalAvoidableDamageTaken += value;
+                            if (isAoe) targetData.TotalAvoidableDamageTaken += value;
+                            RecordAbility(targetData.DamageTakenByAbility, actionId, actionName, value);
                         }
                         break;
 
                     case EffectKind.Heal:
-                        // Caster heals target
                         if (casterData != null)
                         {
-                            // Approximate overheal: if target has full HP, entire heal is overheal
-                            var overheal = ComputeOverheal(targetId, value);
+                            var overheal   = ComputeOverheal(targetId, value);
                             var actualHeal = value - overheal;
                             casterData.TotalHealingDone     += actualHeal;
                             casterData.TotalOverhealingDone += overheal;
                             casterData.HealingEvents.Add((tickMs, actualHeal));
+                            RecordAbility(casterData.HealingByAbility, actionId, actionName, actualHeal, overheal);
                         }
                         break;
                 }
             }
+        }
+    }
+
+    // ── Ability stats helpers ─────────────────────────────────────────────────
+    private static void RecordAbility(
+        Dictionary<uint, AbilityStats> dict,
+        uint actionId, string name, long amount, long overheal = 0)
+    {
+        if (!dict.TryGetValue(actionId, out var stats))
+        {
+            stats = new AbilityStats { ActionId = actionId, Name = name };
+            dict[actionId] = stats;
+        }
+        stats.Record(amount, overheal);
+    }
+
+    private string GetActionName(uint actionId)
+    {
+        if (_actionNames.TryGetValue(actionId, out var cached)) return cached;
+        try
+        {
+            var name = _dataManager
+                .GetExcelSheet<Lumina.Excel.Sheets.Action>()
+                ?.GetRow(actionId).Name.ToString();
+            var result = !string.IsNullOrWhiteSpace(name) ? name : $"#{actionId}";
+            _actionNames[actionId] = result;
+            return result;
+        }
+        catch
+        {
+            _actionNames[actionId] = $"#{actionId}";
+            return _actionNames[actionId];
         }
     }
 
@@ -295,19 +309,17 @@ public sealed class CombatTracker : IDisposable
         CombatSession session, uint entityId, Character* charPtr)
     {
         if (entityId == 0) return null;
-        if (session.Combatants.TryGetValue(entityId, out var existing))
-            return existing;
+        if (session.Combatants.TryGetValue(entityId, out var existing)) return existing;
 
         var data = new CombatantData { EntityId = entityId };
+        var obj  = _objectTable.FirstOrDefault(o => o.EntityId == entityId);
 
-        // Try Dalamud object table first (has name + world)
-        var obj = _objectTable.FirstOrDefault(o => o.EntityId == entityId);
         if (obj != null)
         {
             data.Name  = obj.Name.TextValue;
             data.World = GetPlayerWorld(obj);
+            data.Type  = DetermineType(entityId, obj);
         }
-        // No raw pointer name fallback — unreliable across FFXIVClientStructs versions
 
         if (charPtr != null)
             data.ClassJobId = charPtr->CharacterData.ClassJob;
@@ -319,25 +331,41 @@ public sealed class CombatTracker : IDisposable
     private CombatantData? GetOrCreateCombatantById(CombatSession session, uint entityId)
     {
         if (entityId == 0) return null;
-        if (session.Combatants.TryGetValue(entityId, out var existing))
-            return existing;
+        if (session.Combatants.TryGetValue(entityId, out var existing)) return existing;
 
         var obj = _objectTable.FirstOrDefault(o => o.EntityId == entityId);
-        if (obj == null) return null; // NPCs/unknown objects — skip
+        if (obj == null) return null;
 
         var data = new CombatantData
         {
-            EntityId   = entityId,
-            Name       = obj.Name.TextValue,
-            World      = GetPlayerWorld(obj),
+            EntityId = entityId,
+            Name     = obj.Name.TextValue,
+            World    = GetPlayerWorld(obj),
+            Type     = DetermineType(entityId, obj),
         };
 
-        // Job: try cast to IBattleChara (players + enemies both implement it)
         if (obj is IBattleChara chara)
             data.ClassJobId = (byte)chara.ClassJob.RowId;
 
         session.Combatants[entityId] = data;
         return data;
+    }
+
+    private CombatantType DetermineType(uint entityId, IGameObject obj)
+    {
+        if (obj is IPlayerCharacter)
+        {
+            // Check if in the local party list
+            foreach (var member in _partyList)
+            {
+                if (member.EntityId == entityId)
+                    return CombatantType.PartyMember;
+            }
+            return CombatantType.FriendlyPlayer;
+        }
+        if (obj is IBattleChara)
+            return CombatantType.Enemy;
+        return CombatantType.Unknown;
     }
 
     private long ComputeOverheal(uint targetId, long healValue)
@@ -346,7 +374,7 @@ public sealed class CombatTracker : IDisposable
         if (obj is IBattleChara chara)
         {
             var missing = (long)chara.MaxHp - (long)chara.CurrentHp;
-            if (missing <= 0) return healValue; // already full HP
+            if (missing <= 0) return healValue;
             return Math.Max(0, healValue - missing);
         }
         return 0;
@@ -368,15 +396,10 @@ public sealed class CombatTracker : IDisposable
                 ?.GetRow(_clientState.TerritoryType);
             return territory?.PlaceName.Value.Name.ToString() ?? "Unknown";
         }
-        catch
-        {
-            return "Unknown";
-        }
+        catch { return "Unknown"; }
     }
 
-    // ── Session management (public API) ───────────────────────────────────────
-
-    /// <summary>Manually save a temp session to the permanent saved list.</summary>
+    // ── Session management ────────────────────────────────────────────────────
     public void SaveSession(CombatSession session)
     {
         if (Store.SavedSessions.Any(s => s.Id == session.Id)) return;
@@ -386,7 +409,6 @@ public sealed class CombatTracker : IDisposable
         SaveStore();
     }
 
-    /// <summary>Delete a session from either list.</summary>
     public void DeleteSession(CombatSession session)
     {
         Store.TempSessions.Remove(session);
@@ -417,7 +439,8 @@ public sealed class CombatTracker : IDisposable
     {
         try
         {
-            var json = JsonConvert.SerializeObject(Store, Formatting.Indented);
+            var settings = new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore };
+            var json     = JsonConvert.SerializeObject(Store, Formatting.Indented, settings);
             File.WriteAllText(_storePath, json);
         }
         catch (Exception ex)
@@ -430,11 +453,7 @@ public sealed class CombatTracker : IDisposable
     public void Dispose()
     {
         _framework.Update -= OnFrameworkUpdate;
-
-        // End any active session cleanly
-        if (ActiveSession != null)
-            EndSession();
-
+        if (ActiveSession != null) EndSession();
         _hook?.Dispose();
         _log.Info("DamageMeter: CombatTracker disposed.");
     }

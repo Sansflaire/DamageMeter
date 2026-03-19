@@ -44,7 +44,7 @@ public sealed class Plugin : IDalamudPlugin
 
         Tracker = new CombatTracker(
             GameInterop, Log, Condition, ObjectTable,
-            ClientState, Framework, DataManager,
+            ClientState, Framework, DataManager, PartyList,
             Config, configDir);
 
         _mainWindow     = new MainWindow(this);
