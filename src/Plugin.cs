@@ -29,6 +29,7 @@ public sealed class Plugin : IDalamudPlugin
     internal readonly MainWindow     _mainWindow;
     internal readonly HistoryWindow  _historyWindow;
     internal readonly SettingsWindow _settingsWindow;
+    internal readonly StatusApi      _statusApi;
 
     private const string CmdMain     = "/dm";
     private const string CmdHistory  = "/dmhistory";
@@ -50,6 +51,7 @@ public sealed class Plugin : IDalamudPlugin
         _mainWindow     = new MainWindow(this);
         _historyWindow  = new HistoryWindow(this);
         _settingsWindow = new SettingsWindow(this);
+        _statusApi      = new StatusApi(this);
 
         CommandManager.AddHandler(CmdMain, new Dalamud.Game.Command.CommandInfo(OnMainCommand)
         {
@@ -104,6 +106,7 @@ public sealed class Plugin : IDalamudPlugin
         _mainWindow.Dispose();
         _historyWindow.Dispose();
         _settingsWindow.Dispose();
+        _statusApi.Dispose();
 
         Tracker.Dispose();
 
