@@ -71,10 +71,11 @@ jobs:
         run: |
           $ts  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           $ver = "${{ steps.ver.outputs.VERSION }}"
-          $pm  = @(Get-Content pluginmaster.json | ConvertFrom-Json)
-          $pm[0].AssemblyVersion = "$ver.0"
-          $pm[0].LastUpdated     = $ts
-          ConvertTo-Json -Depth 5 -InputObject $pm | Set-Content pluginmaster.json
+          $raw = Get-Content pluginmaster.json -Raw | ConvertFrom-Json
+          $entry = if ($raw -is [array]) { $raw[0] } else { $raw }
+          $entry.AssemblyVersion = "$ver.0"
+          $entry.LastUpdated     = $ts
+          "[$($entry | ConvertTo-Json -Depth 5)]" | Set-Content pluginmaster.json
 
           git config user.name  "Sansflaire"
           git config user.email "sansflaire@users.noreply.github.com"
