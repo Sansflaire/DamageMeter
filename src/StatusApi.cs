@@ -41,6 +41,8 @@ namespace DamageMeter;
 ///
 ///   GET /action/session/save?id={id}     → move a temp session to saved
 ///   GET /action/session/delete?id={id}   → delete a session (temp or saved)
+///
+///   GET /meter/image                     → current meter canvas as PNG (image/png)
 /// </summary>
 internal sealed class StatusApi : IDisposable
 {
@@ -97,6 +99,15 @@ internal sealed class StatusApi : IDisposable
     private void Handle(HttpListenerContext ctx)
     {
         var path = ctx.Request.Url?.AbsolutePath.TrimEnd('/').ToLowerInvariant() ?? "";
+
+        // PNG image endpoint — handled separately (binary response)
+        if (path == "/meter/image")
+        {
+            var png = _plugin._mainWindow.Meter.GetPngBytes();
+            if (png == null) { Respond(ctx, 503, "{\"error\":\"no frame rendered yet\"}"); return; }
+            RespondPng(ctx, png);
+            return;
+        }
 
         string? json;
 
@@ -550,6 +561,16 @@ internal sealed class StatusApi : IDisposable
         ctx.Response.ContentLength64  = bytes.Length;
         ctx.Response.Headers.Add("Access-Control-Allow-Origin", "*");
         ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    private static void RespondPng(HttpListenerContext ctx, byte[] png)
+    {
+        ctx.Response.StatusCode       = 200;
+        ctx.Response.ContentType      = "image/png";
+        ctx.Response.ContentLength64  = png.Length;
+        ctx.Response.Headers.Add("Access-Control-Allow-Origin", "*");
+        ctx.Response.OutputStream.Write(png, 0, png.Length);
         ctx.Response.OutputStream.Close();
     }
 }

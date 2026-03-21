@@ -9,6 +9,14 @@ src/obj/
 # Session data (user-specific, not committed)
 *.json
 !DamageMeter.json
+!pluginmaster.json
+
+# Loose build artifacts at repo root (dev plugin copies)
+DamageMeter.dll
+SkiaSharp.dll
+libSkiaSharp.dll
+DamageMeter.zip
+pack/
 
 # Claude context files (never committed per project rules)
 CLAUDE.md

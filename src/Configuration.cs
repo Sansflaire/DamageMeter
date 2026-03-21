@@ -37,13 +37,13 @@ public sealed class Configuration : IPluginConfiguration
     //          teal for overhealing, orange for avoidable damage.
     public Dictionary<MeterType, uint> BarColors { get; set; } = new()
     {
-        [MeterType.DamageDealt]          = 0xCC2828C8,  // ~red
-        [MeterType.DPS]                  = 0xCC2828C8,  // ~red
-        [MeterType.HealingDone]          = 0xCC28C828,  // ~green
-        [MeterType.HPS]                  = 0xCC28C828,  // ~green
-        [MeterType.Overhealing]          = 0xCCC8C828,  // ~yellow-green
-        [MeterType.DamageTaken]          = 0xCCC82828,  // ~blue
-        [MeterType.AvoidableDamageTaken] = 0xCC28C8C8,  // ~orange
+        [MeterType.DamageDealt]          = 0xCC2828C8,  // red
+        [MeterType.DPS]                  = 0xCC2828C8,  // red
+        [MeterType.HealingDone]          = 0xCC28C828,  // green
+        [MeterType.HPS]                  = 0xCC28C828,  // green
+        [MeterType.Overhealing]          = 0xCC28C828,  // green
+        [MeterType.DamageTaken]          = 0xCCC82828,  // blue
+        [MeterType.AvoidableDamageTaken] = 0xCCC82828,  // blue
     };
 
     // ── Window ────────────────────────────────────────────────────────────────

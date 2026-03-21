@@ -1,0 +1,83 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download Dalamud (staging)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/goatcorp/dalamud-distrib/raw/main/stg/latest.zip" -OutFile dalamud.zip
+          Expand-Archive dalamud.zip -DestinationPath C:\dalamud
+
+      - name: Restore
+        shell: pwsh
+        env:
+          DALAMUD_HOME: C:\dalamud
+        run: dotnet restore src/DamageMeter.csproj
+
+      - name: Build
+        shell: pwsh
+        env:
+          DALAMUD_HOME: C:\dalamud
+        run: dotnet build src/DamageMeter.csproj --configuration Release --no-restore
+
+      - name: Get version
+        id: ver
+        shell: pwsh
+        run: |
+          $xml = [xml](Get-Content src/DamageMeter.csproj)
+          $ver = ($xml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1).Version
+          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "pack"
+          New-Item -ItemType Directory $out | Out-Null
+          Copy-Item src/bin/Release/DamageMeter.dll $out/
+          Copy-Item src/bin/Release/SkiaSharp.dll   $out/ -ErrorAction SilentlyContinue
+          Copy-Item src/bin/Release/libSkiaSharp.dll $out/ -ErrorAction SilentlyContinue
+          Copy-Item DamageMeter.json $out/
+          Compress-Archive -Path $out/* -DestinationPath DamageMeter.zip
+
+      - name: Create/update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.VERSION }}
+          name: DamageMeter v${{ steps.ver.outputs.VERSION }}
+          files: DamageMeter.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update pluginmaster.json
+        shell: pwsh
+        run: |
+          $ts  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          $ver = "${{ steps.ver.outputs.VERSION }}"
+          $pm  = Get-Content pluginmaster.json | ConvertFrom-Json
+          $pm[0].AssemblyVersion = "$ver.0"
+          $pm[0].LastUpdated     = $ts
+          $pm | ConvertTo-Json -Depth 5 | Set-Content pluginmaster.json
+
+          git config user.name  "Sansflaire"
+          git config user.email "sansflaire@users.noreply.github.com"
+          git add pluginmaster.json
+          git diff --cached --quiet || git commit -m "chore: update pluginmaster v$ver [skip ci]"
+          git push

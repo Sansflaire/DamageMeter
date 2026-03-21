@@ -12,11 +12,12 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AssemblyName>DamageMeter</AssemblyName>
     <RootNamespace>DamageMeter</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
   </PropertyGroup>
 
   <PropertyGroup>
-    <DalamudLibPath>$(APPDATA)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
+    <DalamudLibPath Condition="'$(DALAMUD_HOME)' != ''">$(DALAMUD_HOME)\</DalamudLibPath>
+    <DalamudLibPath Condition="'$(DALAMUD_HOME)' == ''">$(APPDATA)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,12 +32,23 @@
     <Reference Include="Serilog"              HintPath="$(DalamudLibPath)Serilog.dll"              Private="false" />
   </ItemGroup>
 
-  <!-- Auto-copy DLL to devPlugins after build -->
-  <Target Name="CopyToDevPlugins" AfterTargets="Build">
-    <Copy
-      SourceFiles="$(TargetPath)"
-      DestinationFolder="$(APPDATA)\XIVLauncher\devPlugins\DamageMeter\"
-      OverwriteReadOnlyFiles="true"
-    />
+  <ItemGroup>
+    <PackageReference Include="SkiaSharp"                    Version="3.118.0-preview.1.2" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.118.0-preview.1.2" />
+  </ItemGroup>
+
+  <!-- Auto-copy DLL + SkiaSharp natives to devPlugins after build (local dev only) -->
+  <Target Name="CopyToDevPlugins" AfterTargets="Build" Condition="'$(DALAMUD_HOME)' == ''">
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(APPDATA)\XIVLauncher\devPlugins\DamageMeter\"
+          OverwriteReadOnlyFiles="true" />
+    <Copy SourceFiles="$(OutputPath)SkiaSharp.dll"
+          DestinationFolder="$(APPDATA)\XIVLauncher\devPlugins\DamageMeter\"
+          OverwriteReadOnlyFiles="true"
+          Condition="Exists('$(OutputPath)SkiaSharp.dll')" />
+    <Copy SourceFiles="$(OutputPath)libSkiaSharp.dll"
+          DestinationFolder="$(APPDATA)\XIVLauncher\devPlugins\DamageMeter\"
+          OverwriteReadOnlyFiles="true"
+          Condition="Exists('$(OutputPath)libSkiaSharp.dll')" />
   </Target>
 </Project>

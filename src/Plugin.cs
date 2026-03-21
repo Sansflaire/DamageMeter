@@ -22,14 +22,18 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static ITextureProvider        TextureProvider { get; private set; } = null!;
     [PluginService] internal static IPartyList              PartyList       { get; private set; } = null!;
 
+    // ── Cross-assembly static accessor (for DamageMeterUmbra) ─────────────────
+    public static Plugin? Instance { get; private set; }
+
     // ── Plugin state ──────────────────────────────────────────────────────────
     internal Configuration Config  { get; }
-    internal CombatTracker Tracker { get; }
+    public   CombatTracker Tracker { get; }
 
     internal readonly MainWindow     _mainWindow;
     internal readonly HistoryWindow  _historyWindow;
     internal readonly SettingsWindow _settingsWindow;
     internal readonly StatusApi      _statusApi;
+    internal readonly IpcBridge      _ipcBridge;
 
     private const string CmdMain     = "/dm";
     private const string CmdHistory  = "/dmhistory";
@@ -52,6 +56,7 @@ public sealed class Plugin : IDalamudPlugin
         _historyWindow  = new HistoryWindow(this);
         _settingsWindow = new SettingsWindow(this);
         _statusApi      = new StatusApi(this);
+        _ipcBridge      = new IpcBridge(this);
 
         CommandManager.AddHandler(CmdMain, new Dalamud.Game.Command.CommandInfo(OnMainCommand)
         {
@@ -70,6 +75,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi    += OnOpenMainUi;
         PluginInterface.UiBuilder.OpenConfigUi  += OnOpenSettings;
 
+        Instance = this;
         Log.Info("DamageMeter: Plugin loaded.");
     }
 
@@ -108,7 +114,9 @@ public sealed class Plugin : IDalamudPlugin
         _settingsWindow.Dispose();
         _statusApi.Dispose();
 
+        _ipcBridge.Dispose();
         Tracker.Dispose();
+        Instance = null;
 
         Log.Info("DamageMeter: Plugin unloaded.");
     }
