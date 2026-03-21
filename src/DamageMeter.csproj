@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/14.0.2">
   <PropertyGroup>
-    <Version>0.2.2</Version>
+    <Version>0.2.3</Version>
     <AssemblyName>DamageMeter</AssemblyName>
     <RootNamespace>DamageMeter</RootNamespace>
     <ImplicitUsings>disable</ImplicitUsings>

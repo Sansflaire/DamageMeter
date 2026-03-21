@@ -3,7 +3,7 @@
     "Author": "Sansflaire",
     "Name": "Damage Meter",
     "InternalName": "DamageMeter",
-    "AssemblyVersion": "0.2.2.0",
+    "AssemblyVersion": "0.2.3.0",
     "Punchline": "Real-time combat damage/healing meter for FFXIV.",
     "Description": "Tracks damage dealt, healing done, DPS, HPS, overhealing, damage taken, and more in real time for you and your party. Stores up to 20 recent combat sessions with manual save slots. Fully configurable display, bar colors, and window styles.",
     "ApplicableVersion": "any",
