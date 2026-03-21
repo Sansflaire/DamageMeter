@@ -1,44 +1,30 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Dalamud.NET.Sdk/14.0.2">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <LangVersion>latest</LangVersion>
-    <Platforms>x64</Platforms>
-    <Platform>x64</Platform>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>disable</ImplicitUsings>
-    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
-    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Version>0.2.1</Version>
     <AssemblyName>DamageMeter</AssemblyName>
     <RootNamespace>DamageMeter</RootNamespace>
-    <Version>0.2.0</Version>
+    <ImplicitUsings>disable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- DalamudPackager manifest fields -->
   <PropertyGroup>
-    <DalamudLibPath Condition="'$(DALAMUD_HOME)' != ''">$(DALAMUD_HOME)\</DalamudLibPath>
-    <DalamudLibPath Condition="'$(DALAMUD_HOME)' == ''">$(APPDATA)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
+    <Author>Sansflaire</Author>
+    <Name>Damage Meter</Name>
+    <Punchline>Real-time combat damage/healing meter for FFXIV.</Punchline>
+    <Description>Tracks damage dealt, healing done, DPS, HPS, overhealing, damage taken, and more in real time for you and your party. Stores up to 20 recent combat sessions automatically, with manual save slots for encounters you want to keep. Fully configurable display, bar colors, and window styles.</Description>
+    <ApplicableVersion>any</ApplicableVersion>
+    <DalamudApiLevel>14</DalamudApiLevel>
+    <Tags>combat;utility;meter;dps;parsing</Tags>
+    <RepoUrl>https://github.com/Sansflaire/DamageMeter</RepoUrl>
   </PropertyGroup>
-
-  <ItemGroup>
-    <Reference Include="Dalamud"               HintPath="$(DalamudLibPath)Dalamud.dll"               Private="false" />
-    <Reference Include="Dalamud.Common"        HintPath="$(DalamudLibPath)Dalamud.Common.dll"        Private="false" />
-    <Reference Include="Dalamud.Bindings.ImGui" HintPath="$(DalamudLibPath)Dalamud.Bindings.ImGui.dll" Private="false" />
-    <Reference Include="FFXIVClientStructs"    HintPath="$(DalamudLibPath)FFXIVClientStructs.dll"    Private="false" />
-    <Reference Include="InteropGenerator.Runtime" HintPath="$(DalamudLibPath)InteropGenerator.Runtime.dll" Private="false" />
-    <Reference Include="Lumina"               HintPath="$(DalamudLibPath)Lumina.dll"               Private="false" />
-    <Reference Include="Lumina.Excel"         HintPath="$(DalamudLibPath)Lumina.Excel.dll"         Private="false" />
-    <Reference Include="Newtonsoft.Json"      HintPath="$(DalamudLibPath)Newtonsoft.Json.dll"      Private="false" />
-    <Reference Include="Serilog"              HintPath="$(DalamudLibPath)Serilog.dll"              Private="false" />
-  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="SkiaSharp"                    Version="3.118.0-preview.1.2" />
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.118.0-preview.1.2" />
   </ItemGroup>
 
-  <!-- Auto-copy DLL + SkiaSharp natives to devPlugins after build (local dev only) -->
-  <Target Name="CopyToDevPlugins" AfterTargets="Build" Condition="'$(DALAMUD_HOME)' == ''">
+  <!-- Auto-copy DLL + SkiaSharp to devPlugins after Debug build (local dev only) -->
+  <Target Name="CopyToDevPlugins" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
     <Copy SourceFiles="$(TargetPath)"
           DestinationFolder="$(APPDATA)\XIVLauncher\devPlugins\DamageMeter\"
           OverwriteReadOnlyFiles="true" />
@@ -46,9 +32,5 @@
           DestinationFolder="$(APPDATA)\XIVLauncher\devPlugins\DamageMeter\"
           OverwriteReadOnlyFiles="true"
           Condition="Exists('$(OutputPath)SkiaSharp.dll')" />
-    <Copy SourceFiles="$(OutputPath)libSkiaSharp.dll"
-          DestinationFolder="$(APPDATA)\XIVLauncher\devPlugins\DamageMeter\"
-          OverwriteReadOnlyFiles="true"
-          Condition="Exists('$(OutputPath)libSkiaSharp.dll')" />
   </Target>
 </Project>

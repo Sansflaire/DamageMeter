@@ -21,22 +21,18 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Download Dalamud
+      - name: Download Dalamud (staging)
         shell: pwsh
         run: |
-          Invoke-WebRequest "https://github.com/goatcorp/dalamud-distrib/raw/main/latest.zip" -OutFile dalamud.zip
-          Expand-Archive dalamud.zip -DestinationPath C:\dalamud
+          Invoke-WebRequest "https://github.com/goatcorp/dalamud-distrib/raw/main/stg/latest.zip" -OutFile dalamud.zip
+          Expand-Archive dalamud.zip -DestinationPath "$env:APPDATA\XIVLauncher\addon\Hooks\dev" -Force
 
       - name: Restore
         shell: pwsh
-        env:
-          DALAMUD_HOME: C:\dalamud
         run: dotnet restore src/DamageMeter.csproj
 
       - name: Build
         shell: pwsh
-        env:
-          DALAMUD_HOME: C:\dalamud
         run: dotnet build src/DamageMeter.csproj --configuration Release --no-restore
 
       - name: Get version
@@ -50,20 +46,11 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $out = "pack"
-          $releaseDir = "src/bin/x64/Release"
-          New-Item -ItemType Directory $out | Out-Null
-          Copy-Item "$releaseDir/DamageMeter.dll" $out/
-          Copy-Item "$releaseDir/SkiaSharp.dll"   $out/ -ErrorAction SilentlyContinue
-          # Preserve runtimes/ subfolder so .NET native DLL resolution works
-          if (Test-Path "$releaseDir/runtimes") {
-            Copy-Item "$releaseDir/runtimes" $out/runtimes -Recurse
-          } else {
-            Write-Error "runtimes/ folder not found — libSkiaSharp.dll will be missing"
-          }
-          Copy-Item DamageMeter.json $out/
-          Write-Host "Pack contents:"; Get-ChildItem $out -Recurse | Format-Table FullName, Length
-          Compress-Archive -Path $out/* -DestinationPath DamageMeter.zip
+          # DalamudPackager (included in Dalamud.NET.Sdk) creates the zip automatically
+          $zip = "src/bin/Release/DamageMeter/latest.zip"
+          if (-not (Test-Path $zip)) { Write-Error "DalamudPackager zip not found at $zip"; exit 1 }
+          Copy-Item $zip DamageMeter.zip
+          Write-Host "Packaged: $((Get-Item DamageMeter.zip).Length) bytes"
 
       - name: Create/update GitHub release
         uses: softprops/action-gh-release@v2
@@ -78,11 +65,10 @@ jobs:
         run: |
           $ts  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           $ver = "${{ steps.ver.outputs.VERSION }}"
-          $raw = Get-Content pluginmaster.json -Raw | ConvertFrom-Json
-          $entry = if ($raw -is [array]) { $raw[0] } else { $raw }
-          $entry.AssemblyVersion = "$ver.0"
-          $entry.LastUpdated     = $ts
-          "[$($entry | ConvertTo-Json -Depth 5)]" | Set-Content pluginmaster.json
+          $json = @(Get-Content pluginmaster.json -Raw | ConvertFrom-Json)
+          $json[0].AssemblyVersion = "$ver.0"
+          $json[0].LastUpdated     = $ts
+          $json | ConvertTo-Json -Depth 10 -AsArray | Set-Content pluginmaster.json
 
           git config user.name  "Sansflaire"
           git config user.email "sansflaire@users.noreply.github.com"
