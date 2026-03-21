@@ -71,7 +71,7 @@ jobs:
         run: |
           $ts  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           $ver = "${{ steps.ver.outputs.VERSION }}"
-          $pm  = Get-Content pluginmaster.json | ConvertFrom-Json
+          $pm  = @(Get-Content pluginmaster.json | ConvertFrom-Json)
           $pm[0].AssemblyVersion = "$ver.0"
           $pm[0].LastUpdated     = $ts
           $pm | ConvertTo-Json -Depth 5 | Set-Content pluginmaster.json
