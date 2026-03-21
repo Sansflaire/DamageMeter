@@ -21,24 +21,25 @@ namespace DamageMeter.Windows;
 public sealed class MeterCanvas : IDisposable
 {
     // ── Section heights ───────────────────────────────────────────────────────
-    public  const float TitleBarH  = 22f;  // exposed: "DAMAGE METER" title strip
-    private const float EncounterH = 58f;  // encounter info (zone, timer, total value)
+    public  const float TitleBarH  = 28f;  // exposed: "DAMAGE METER" title strip
+    private const float EncounterH = 52f;  // encounter info — centered single line
     private const float HeaderH    = TitleBarH + EncounterH; // 80px total header
-    private const float DividerH   =  2f;  // separator line below header
-    private const float GroupH     = 22f;  // per-group title row
-    private const float RowH       = 34f;  // per-combatant row (more breathing room)
-    private const float GroupGap   =  8f;  // vertical gap between groups
+    private const float DividerH   =  1f;  // separator line below header
+    private const float GroupH     = 28f;  // per-group title row
+    private const float RowH       = 56f;  // per-combatant row
+    private const float BarH       = 10f;  // fill bar strip height at bottom of row
+    private const float GroupGap   =  6f;  // vertical gap between groups
 
     // ── Row layout (left → right) ─────────────────────────────────────────────
-    private const float StripeW  =  3f;  // left accent stripe
-    private const float LeftPad  =  5f;
-    private const float RankW    = 20f;  // rank number column
-    private const float BadgeW   = 22f;  // job icon badge — square 1:1
-    private const float BadgeH   = 22f;
+    private const float StripeW  =  4f;  // left accent stripe
+    private const float LeftPad  =  8f;
+    private const float RankW    = 24f;  // rank number column
+    private const float BadgeW   = 36f;  // job icon badge — square 1:1
+    private const float BadgeH   = 36f;
     // Right columns (right edge of window)
-    private const float RightPad =  6f;
-    private const float PctW     = 36f;
-    private const float ValW     = 60f;
+    private const float RightPad = 10f;
+    private const float PctW     = 38f;
+    private const float ValW     = 72f;
 
     // X where name text starts
     private const float NameX    = StripeW + LeftPad + RankW + LeftPad + BadgeW + LeftPad;
@@ -47,12 +48,14 @@ public sealed class MeterCanvas : IDisposable
 
     // ── Font sizes ────────────────────────────────────────────────────────────
     private const float FtHeader = 14f;
-    private const float FtZone   = 13f;
-    private const float FtTimer  = 18f;
+    private const float FtZone   = 11f;
+    private const float FtTimer  = 22f;
     private const float FtMain   = 13f;
     private const float FtSub    = 11f;
     private const float FtBadge  =  9f;
-    private const float FtRank   = 10f;
+    private const float FtRank   = 13f;
+    private const float FtName   = 14f;
+    private const float FtValue  = 17f;
 
     // ── Color palette ─────────────────────────────────────────────────────────
     // Backgrounds
@@ -93,6 +96,23 @@ public sealed class MeterCanvas : IDisposable
 
     // Local player accent
     private static readonly SKColor LocalAccent = new(0x44, 0xEE, 0xFF, 0xFF); // cyan
+
+    // Rank-position palette — party members get these in order (rank 1 = gold, etc.)
+    private static readonly SKColor[] RankPalette =
+    [
+        new(0xFF, 0xB8, 0x00, 0xFF), // 1 gold
+        new(0x44, 0x99, 0xFF, 0xFF), // 2 blue
+        new(0xFF, 0x88, 0x22, 0xFF), // 3 orange
+        new(0xCC, 0x44, 0xDD, 0xFF), // 4 purple
+        new(0x44, 0xCC, 0x88, 0xFF), // 5 green
+        new(0xFF, 0x44, 0x88, 0xFF), // 6 rose
+        new(0x44, 0xFF, 0xEE, 0xFF), // 7 cyan
+        new(0xDD, 0xCC, 0x44, 0xFF), // 8 yellow-green
+    ];
+    private static readonly SKColor EnemyBarCol = new(0xFF, 0x88, 0x22, 0xFF); // amber
+
+    private static SKColor PaletteFor(int rank) =>
+        RankPalette[Math.Clamp(rank - 1, 0, RankPalette.Length - 1)];
 
     // ── Display options (passed from MainWindow each frame) ───────────────────
     public struct DisplayOptions
@@ -332,32 +352,34 @@ public sealed class MeterCanvas : IDisposable
             return;
         }
 
-        float padX  = 10f;
-        float line1 = encY + 16f;  // status / zone row
-        float line2 = encY + 44f;  // metric label / big value row
+        float cx   = w * 0.5f;
+        float midY = encY + EncounterH * 0.5f;
 
-        // Line 1 left: status indicator + zone name
-        if (session.IsActive)
-        {
-            Draw(canvas, "●", padX, line1, 9f, false, TextLive, Align.Left);
-            Draw(canvas, " LIVE", padX + 11f, line1, FtSub, true, TextLive, Align.Left);
-            Draw(canvas, session.ZoneName, padX + 42f, line1, FtZone, false, TextZone, Align.Left);
-        }
-        else
-        {
-            Draw(canvas, "■", padX, line1, 8f, false, TextEnded, Align.Left);
-            Draw(canvas, session.ZoneName, padX + 14f, line1, FtZone, false, TextZone, Align.Left);
-        }
+        // Zone + status — small subtitle above main value
+        string statusDot  = session.IsActive ? "● " : "■ ";
+        SKColor dotCol    = session.IsActive ? TextLive : TextEnded;
+        float subY        = encY + 14f;
+        Draw(canvas, statusDot,      cx - 4f, subY, 9f,    false, dotCol,   Align.Right);
+        Draw(canvas, session.ZoneName, cx,    subY, FtZone, false, TextMuted, Align.Left);
 
-        // Line 1 right: timer (small, muted-gold)
-        Draw(canvas, session.FormattedDuration, w - padX, line1, FtMain, false, TextTimer, Align.Right);
+        // Big centered line: "Total Damage:  2.90M  (2m 14s)"
+        string metricLabel = $"Total {metric.DisplayName()}:";
+        string bigVal      = groupTotal > 0 ? FormatVal((long)groupTotal, metric) : "—";
+        string timerStr    = $"  ({session.FormattedDuration})";
 
-        // Line 2 left: metric label
-        Draw(canvas, metric.DisplayName().ToUpperInvariant(), padX, line2, FtSub, false, TextMuted, Align.Left);
+        // Measure to center the whole assembly
+        using var fontMain = Font(FtMain, false);
+        using var fontBig  = Font(FtTimer, true);
+        using var fontSub2 = Font(FtMain, false);
+        float labelW = fontMain.MeasureText(metricLabel + " ");
+        float valW2  = fontBig.MeasureText(bigVal);
+        float timerW = fontSub2.MeasureText(timerStr);
+        float totalLineW = labelW + valW2 + timerW;
+        float startX = cx - totalLineW * 0.5f;
 
-        // Line 2 right: BIG total value — focal point of the header
-        string bigVal = groupTotal > 0 ? FormatVal((long)groupTotal, metric) : "—";
-        Draw(canvas, bigVal, w - padX, line2, 21f, true, TextTimer, Align.Right);
+        Draw(canvas, metricLabel + " ", startX + labelW * 0.5f,         midY + 6f, FtMain,  false, TextMuted,  Align.Center);
+        Draw(canvas, bigVal,            startX + labelW + valW2 * 0.5f, midY + 6f, FtTimer, true,  TextTimer,  Align.Center);
+        Draw(canvas, timerStr,          startX + labelW + valW2 + timerW * 0.5f, midY + 6f, FtMain, false, TextMuted, Align.Center);
     }
 
     // ── Group header row ──────────────────────────────────────────────────────
@@ -380,14 +402,16 @@ public sealed class MeterCanvas : IDisposable
         }
 
         // Left accent stripe
-        _p.Color = group.Accent.WithAlpha(0xCC);
+        _p.Color = group.Accent.WithAlpha(0xE0);
         canvas.DrawRect(SKRect.Create(0, y, StripeW, GroupH), _p);
 
         float midY = y + GroupH * 0.5f;
 
-        // Group label
-        string label = $"{group.Label}  ({group.Combatants.Count})";
-        Draw(canvas, label, StripeW + 8f, midY, FtSub, true, group.Accent, Align.Left);
+        // Group label — name in accent, count in muted (measure label width for correct placement)
+        using var gFont = Font(FtMain, true);
+        float labelW2 = gFont.MeasureText(group.Label);
+        Draw(canvas, group.Label,                    StripeW + 10f,             midY, FtMain, true,  group.Accent, Align.Left);
+        Draw(canvas, $"  ({group.Combatants.Count})", StripeW + 10f + labelW2,  midY, FtSub, false, TextMuted, Align.Left);
 
         // Top value right-aligned
         if (topVal > 0)
@@ -403,83 +427,82 @@ public sealed class MeterCanvas : IDisposable
         SKColor accent, int w, float y, double val, double pct, MeterType metric,
         uint localEntityId, DisplayOptions opts)
     {
-        bool    isLocal  = localEntityId != 0 && c.EntityId == localEntityId;
-        SKColor rankCol  = isLocal ? LocalAccent : RankColor(rank, accent);
-        SKColor barColor = opts.BarColorAbgr != 0 ? AbgrToSkColor(opts.BarColorAbgr) : rankCol;
-        float   midY     = y + RowH * 0.5f;
+        bool    isLocal   = localEntityId != 0 && c.EntityId == localEntityId;
+        bool    isFriendly = c.Type == CombatantType.PartyMember || c.Type == CombatantType.FriendlyPlayer;
+        SKColor barColor  = isLocal ? LocalAccent : isFriendly ? PaletteFor(rank) : EnemyBarCol;
+        SKColor rankCol   = isLocal ? LocalAccent : RankColor(rank, accent);
 
-        // 1. Alternating background (slightly lighter for local player)
-        SKColor rowBg;
-        if (isLocal)
-            rowBg = new SKColor(0x10, 0x18, 0x22, 0xFF);
-        else if (opts.Style == WindowStyle.Minimal)
-            rowBg = rowIdx % 2 == 0 ? new SKColor(0x08, 0x08, 0x0E, 0xCC) : new SKColor(0x05, 0x05, 0x0A, 0xCC);
-        else if (opts.Style == WindowStyle.Modern)
-            rowBg = rowIdx % 2 == 0 ? new SKColor(0x08, 0x0C, 0x10, 0xFF) : new SKColor(0x0C, 0x10, 0x16, 0xFF);
-        else
-            rowBg = rowIdx % 2 == 0 ? BgEven : BgOdd;
+        // Content sits in the upper portion, bar at bottom
+        float contentMidY = y + (RowH - BarH - 2f) * 0.5f;
+
+        // 1. Row background
+        SKColor rowBg = isLocal
+            ? new SKColor(0x0E, 0x18, 0x28, 0xFF)
+            : rowIdx % 2 == 0 ? BgEven : BgOdd;
         _p.Color  = rowBg;
         _p.Shader = null;
         canvas.DrawRect(SKRect.Create(0, y, w, RowH), _p);
 
-        // 2. Subtle full-width color track (shows bar scale)
-        _p.Color = new SKColor(barColor.Red, barColor.Green, barColor.Blue, 0x18);
-        canvas.DrawRect(SKRect.Create(StripeW, y, w - StripeW, RowH), _p);
+        // 2. Full-width ghost track so empty space shows the scale
+        _p.Color = new SKColor(barColor.Red, barColor.Green, barColor.Blue, 0x30);
+        canvas.DrawRect(SKRect.Create(StripeW, y + RowH - BarH - 2f, w - StripeW, BarH), _p);
 
-        // 3. Gradient fill bar (proportional to %)
+        // 3. Fill bar strip at bottom of row
         if (pct > 0.001)
         {
             float barW = (w - StripeW) * (float)pct;
-            var   dark = barColor.WithAlpha(0xB0);
-            var   lite = barColor.WithAlpha(0xFF);
+            float barY = y + RowH - BarH - 2f;
             _p.Shader = SKShader.CreateLinearGradient(
-                new SKPoint(StripeW, y), new SKPoint(StripeW + barW, y),
-                new[] { dark, lite },
+                new SKPoint(StripeW, barY), new SKPoint(StripeW + barW, barY),
+                new[] { barColor.WithAlpha(0xCC), barColor.WithAlpha(0xFF) },
                 SKShaderTileMode.Clamp);
-            canvas.DrawRect(SKRect.Create(StripeW, y, barW, RowH), _p);
+            canvas.DrawRect(SKRect.Create(StripeW, barY, barW, BarH), _p);
             _p.Shader = null;
         }
 
-        // 4. Left stripe
-        _p.Color = rankCol;
+        // 4. Left stripe — bar color
+        _p.Color = barColor.WithAlpha(0xE0);
         canvas.DrawRect(SKRect.Create(0, y, StripeW, RowH), _p);
 
-        // 5. Rank number
-        float rankRightX = StripeW + LeftPad + RankW;
-        Draw(canvas, rank.ToString(), rankRightX, midY, FtRank, true,
-             rank <= 3 ? rankCol : TextDim, Align.Right);
+        // 5. Thin row separator
+        _p.Color = new SKColor(0x20, 0x20, 0x38, 0xFF);
+        canvas.DrawRect(SKRect.Create(0, y + RowH - 1f, w, 1f), _p);
 
-        // 6. Job badge (skip column if ShowJobIcon = false)
+        // 6. Rank number
+        float rankRightX = StripeW + LeftPad + RankW;
+        Draw(canvas, rank.ToString(), rankRightX, contentMidY, FtRank, true,
+             rank == 1 ? Gold : rank == 2 ? Silver : rank == 3 ? Bronze : TextDim, Align.Right);
+
+        // 7. Job badge
         float nameStartX = NameX;
         if (opts.ShowJobIcon)
         {
             float badgeX = rankRightX + LeftPad;
-            float badgeY = y + (RowH - BadgeH) * 0.5f;
+            float badgeY = y + (RowH - BarH - 2f - BadgeH) * 0.5f;
             DrawJobBadge(canvas, c.ClassJobId, c.Name, badgeX, badgeY);
         }
         else
         {
-            // Reclaim badge + padding space for name
             nameStartX = rankRightX + LeftPad;
         }
 
-        // 7. Name — apply full/initials and @server settings
+        // 8. Name
         string displayName = opts.ShowFullName ? c.Name : ToInitials(c.Name);
         if (opts.ShowPlayerServer && !string.IsNullOrEmpty(c.World))
             displayName += "@" + c.World;
 
         float nameMaxW = w - nameStartX - RightReserve - 4f;
-        Draw(canvas, displayName, nameStartX, midY, 14f, isLocal,
-             isLocal ? SKColors.White : TextPrim, Align.Left, nameMaxW);
+        Draw(canvas, displayName, nameStartX, contentMidY, FtName, rank == 1 || isLocal,
+             isLocal ? LocalAccent : TextPrim, Align.Left, nameMaxW);
 
-        // 8. Value — dominant number (15px bold)
+        // 9. Value
         float valRightX = w - RightPad - (opts.ShowPercentage ? PctW + 4f : 0f);
-        Draw(canvas, FormatVal((long)val, metric), valRightX, midY, 15f, true,
+        Draw(canvas, FormatVal((long)val, metric), valRightX, contentMidY, FtValue, true,
              isLocal ? LocalAccent : TextPrim, Align.Right);
 
-        // 9. Pct — muted, far right, small
+        // 10. Pct
         if (opts.ShowPercentage && pct > 0.001)
-            Draw(canvas, $"{pct * 100.0:F0}%", w - RightPad, midY, FtSub, false, TextMuted, Align.Right);
+            Draw(canvas, $"{pct * 100.0:F0}%", w - RightPad, contentMidY, FtSub, false, TextMuted, Align.Right);
     }
 
     // ── Name helpers ──────────────────────────────────────────────────────────
@@ -519,13 +542,14 @@ public sealed class MeterCanvas : IDisposable
 
         _p.Shader = null;
         _p.Color  = new SKColor(roleCol.Red, roleCol.Green, roleCol.Blue, 0xA0);
-        canvas.DrawRoundRect(SKRect.Create(x, y, BadgeW, BadgeH), 3, 3, _p);
-        Draw(canvas, abbr, x + BadgeW * 0.5f, y + BadgeH * 0.5f, FtBadge, true, SKColors.White, Align.Center);
+        canvas.DrawRoundRect(SKRect.Create(x, y, BadgeW, BadgeH), 4, 4, _p);
+        Draw(canvas, abbr, x + BadgeW * 0.5f, y + BadgeH * 0.5f, 11f, true, SKColors.White, Align.Center);
     }
 
     // ── Job icon loading (FFXIV ClassJob icons: ID 62001–62042) ───────────────
     private SKImage? GetJobIcon(byte jobId)
     {
+        if (jobId == 0) return null; // job 0 = Adventurer placeholder — skip
         if (_jobIconCache.TryGetValue(jobId, out var cached)) return cached;
 
         // Icon IDs: ui/icon/062000/0620XX_hr1.tex where XX = classJobId
