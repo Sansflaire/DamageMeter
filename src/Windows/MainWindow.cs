@@ -32,6 +32,17 @@ public sealed class MainWindow : IDisposable
     private float _scrollY = 0f;
     private const float ToolbarH = 26f;
 
+    // Layout state shared between DrawCanvasHeader and DrawCanvasBody
+    private Vector2 _imgOrigin;
+    private Vector2 _bodyOrigin;
+    private float   _headerH;
+    private float   _texH;
+    private float   _bodyTexH;
+    private float   _bodyViewH;
+    private float   _maxScroll;
+    private int     _canvasW;
+    private CombatSession? _frameSession;
+
     // ── Constructor ───────────────────────────────────────────────────────────
     public MainWindow(Plugin plugin)
     {
@@ -66,8 +77,9 @@ public sealed class MainWindow : IDisposable
 
         if (!open) { ImGui.End(); return; }
 
-        DrawMeterCanvas();   // canvas first — fills window from top
-        DrawToolbar();       // toolbar at bottom
+        DrawCanvasHeader();  // renders SkiaSharp canvas + draws header slice
+        DrawToolbar();       // toolbar always sits right below the header
+        DrawCanvasBody();    // body slice + scrollbar + hit-test buttons
         DrawDetailPopup();
 
         ImGui.End();
@@ -134,136 +146,101 @@ public sealed class MainWindow : IDisposable
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 2f);
     }
 
-    // ── Panache meter canvas ──────────────────────────────────────────────────
-    private void DrawMeterCanvas()
+    // ── Phase 1: render canvas + draw header slice ────────────────────────────
+    // Stores layout state in fields for DrawCanvasBody to consume.
+    private void DrawCanvasHeader()
     {
-        var session  = GetDisplaySession();
-        var metric   = Config.CurrentMeter;
-        var dur      = session?.DurationSeconds ?? 0;
-        bool pinned       = _plugin._historyWindow.PinnedSession != null;
-        uint localEntityId = Plugin.ObjectTable.LocalPlayer?.EntityId ?? 0;
-        var avail    = ImGui.GetContentRegionAvail();
-        int w        = (int)Math.Max(1, avail.X);
+        _frameSession  = GetDisplaySession();
+        var metric     = Config.CurrentMeter;
+        var dur        = _frameSession?.DurationSeconds ?? 0;
+        bool pinned    = _plugin._historyWindow.PinnedSession != null;
+        uint localId   = Plugin.ObjectTable.LocalPlayer?.EntityId ?? 0;
+        var avail      = ImGui.GetContentRegionAvail();
+        _canvasW       = (int)Math.Max(1, avail.X);
 
         // Build group data
         var groups = new List<MeterCanvas.GroupData>();
-        if (session != null)
+        if (_frameSession != null)
         {
-            var party    = session.GetSortedByType(metric, CombatantType.PartyMember);
-            var friendly = session.GetSortedByType(metric, CombatantType.FriendlyPlayer);
-            var enemies  = session.GetSortedByType(metric, CombatantType.Enemy);
+            var party    = _frameSession.GetSortedByType(metric, CombatantType.PartyMember);
+            var friendly = _frameSession.GetSortedByType(metric, CombatantType.FriendlyPlayer);
+            var enemies  = _frameSession.GetSortedByType(metric, CombatantType.Enemy);
 
             if (party.Count    > 0) groups.Add(new MeterCanvas.GroupData { Label = "Party",    Combatants = party,    Accent = MeterCanvas.GroupAccent(CombatantType.PartyMember) });
             if (friendly.Count > 0 && Config.ShowFriendlyGroup) groups.Add(new MeterCanvas.GroupData { Label = "Friendly", Combatants = friendly, Accent = MeterCanvas.GroupAccent(CombatantType.FriendlyPlayer) });
             if (enemies.Count  > 0 && Config.ShowEnemyGroup)    groups.Add(new MeterCanvas.GroupData { Label = "Enemies",  Combatants = enemies,  Accent = MeterCanvas.GroupAccent(CombatantType.Enemy) });
 
-            // Unknown-type fallback for historical sessions
-            if (groups.Count == 0 && session.Combatants.Count > 0)
+            if (groups.Count == 0 && _frameSession.Combatants.Count > 0)
             {
-                var all = session.GetSortedByType(metric, CombatantType.Unknown);
+                var all = _frameSession.GetSortedByType(metric, CombatantType.Unknown);
                 if (all.Count == 0)
-                    all = session.Combatants.Values.OrderByDescending(c => c.GetValue(metric, dur)).ToList();
+                    all = _frameSession.Combatants.Values.OrderByDescending(c => c.GetValue(metric, dur)).ToList();
                 if (all.Count > 0)
                     groups.Add(new MeterCanvas.GroupData { Label = "Combatants", Combatants = all, Accent = MeterCanvas.GroupAccent(CombatantType.Unknown) });
             }
         }
 
-        const float SbTrackW = 8f; // scrollbar track width reserved in canvas
-
+        const float SbTrackW = 8f;
         var opts = new MeterCanvas.DisplayOptions
         {
-            ShowFullName     = Config.ShowFullName,
-            ShowPlayerServer = Config.ShowPlayerServer,
-            ShowJobIcon      = Config.ShowJobIcon,
-            ShowPercentage   = Config.ShowPercentage,
-            BarColorAbgr     = Config.GetBarColor(metric),
-            Style            = Config.Style,
+            ShowFullName       = Config.ShowFullName,
+            ShowPlayerServer   = Config.ShowPlayerServer,
+            ShowJobIcon        = Config.ShowJobIcon,
+            ShowPercentage     = Config.ShowPercentage,
+            BarColorAbgr       = Config.GetBarColor(metric),
+            Style              = Config.Style,
             ShowEncounterTotal = Config.ShowEncounterTotal,
             ShowGroupHeaders   = Config.ShowGroupHeaders,
             ShowTitleBar       = Config.ShowTitleBar,
         };
 
-        // Pre-render at zero scrollbar width to measure scroll need, then re-render with margin.
-        // Simpler: always reserve SbTrackW when content taller than view (detected last frame).
-        float headerH   = MeterCanvas.GetEffectiveHeaderH(opts);
-        float titleBarH = Config.ShowTitleBar ? MeterCanvas.TitleBarH : 0f;
+        _headerH = MeterCanvas.GetEffectiveHeaderH(opts);
 
-        // Compute tentative scroll metrics from last frame's TotalHeight
-        float texH      = _meter.TotalHeight > 0 ? _meter.TotalHeight : 40f;
-        float bodyTexH0 = Math.Max(0f, texH - headerH);
-        float bodyViewH0 = Math.Max(0f, avail.Y - ToolbarH - headerH);
-        bool  needsScrollbar = bodyTexH0 > bodyViewH0;
-        opts.ScrollbarW = needsScrollbar ? SbTrackW : 0f;
+        // Use last frame's TotalHeight to decide whether a scrollbar is needed
+        float prevTexH   = _meter.TotalHeight > 0 ? _meter.TotalHeight : 40f;
+        float prevBodyTH = Math.Max(0f, prevTexH - _headerH);
+        float prevBodyVH = Math.Max(0f, avail.Y - ToolbarH - _headerH);
+        opts.ScrollbarW  = prevBodyTH > prevBodyVH ? SbTrackW : 0f;
 
-        _meter.Render(w, session, groups, metric, dur, pinned, localEntityId, opts);
-        texH = _meter.TotalHeight > 0 ? _meter.TotalHeight : 40f; // use this frame's height
+        _meter.Render(_canvasW, _frameSession, groups, metric, dur, pinned, localId, opts);
+        _texH    = _meter.TotalHeight > 0 ? _meter.TotalHeight : 40f;
+        _bodyTexH  = Math.Max(0f, _texH - _headerH);
+        _bodyViewH = Math.Max(0f, avail.Y - ToolbarH - _headerH);
+        _maxScroll = Math.Max(0f, _bodyTexH - _bodyViewH);
 
-        // Split into fixed header + scrollable body
-        float bodyTexH  = Math.Max(0f, texH - headerH);
-        float bodyViewH = Math.Max(0f, avail.Y - ToolbarH - headerH);
-        float maxScroll = Math.Max(0f, bodyTexH - bodyViewH);
-
-        // Mouse wheel scrolling
-        if (ImGui.IsWindowHovered() && maxScroll > 0f)
+        // Mouse wheel (processed here so scroll updates before body is drawn)
+        if (ImGui.IsWindowHovered() && _maxScroll > 0f)
         {
             float wheel = ImGui.GetIO().MouseWheel;
             if (wheel != 0f)
-                _scrollY = Math.Clamp(_scrollY - wheel * MeterCanvas.RowH, 0f, maxScroll);
+                _scrollY = Math.Clamp(_scrollY - wheel * MeterCanvas.RowH, 0f, _maxScroll);
         }
-        _scrollY = Math.Clamp(_scrollY, 0f, maxScroll);
+        _scrollY = Math.Clamp(_scrollY, 0f, _maxScroll);
 
         if (!_meter.Handle.HasValue) { ImGui.TextDisabled("Rendering…"); return; }
 
-        var imgOrigin = ImGui.GetCursorScreenPos();
+        _imgOrigin = ImGui.GetCursorScreenPos();
 
-        // Fixed header slice
-        ImGui.Image(_meter.Handle.Value, new Vector2(w, headerH),
-            new Vector2(0f, 0f), new Vector2(1f, headerH / texH));
+        // Draw the header slice — toolbar will be placed right after this by Draw()
+        if (_headerH > 0f)
+            ImGui.Image(_meter.Handle.Value, new Vector2(_canvasW, _headerH),
+                new Vector2(0f, 0f), new Vector2(1f, _headerH / _texH));
 
-        // Scrollable body slice — clamp display height to actual canvas content
-        var bodyOrigin = ImGui.GetCursorScreenPos();
-        if (bodyViewH > 0f)
-        {
-            float availBodyContent = Math.Max(0f, bodyTexH - _scrollY);
-            float displayBodyH     = Math.Min(bodyViewH, availBodyContent);
-            if (displayBodyH > 0f)
-            {
-                float uv0y = (headerH + _scrollY) / texH;
-                float uv1y = Math.Min(1f, (headerH + _scrollY + displayBodyH) / texH);
-                ImGui.Image(_meter.Handle.Value, new Vector2(w, displayBodyH),
-                    new Vector2(0f, uv0y), new Vector2(1f, uv1y));
-            }
-        }
-
-        // Save cursor position after the body image — toolbar must render here regardless
-        // of any SetCursorScreenPos calls we make below for invisible hit-test buttons.
-        var afterCanvasPos = ImGui.GetCursorScreenPos();
-
-        var dl = ImGui.GetWindowDrawList();
-
-        // Scrollbar thumb
-        if (maxScroll > 0f && bodyViewH > 0f)
-        {
-            const float sbW  = 4f;
-            float barH       = Math.Max(20f, bodyViewH * (bodyViewH / bodyTexH));
-            float barY       = bodyOrigin.Y + (_scrollY / maxScroll) * (bodyViewH - barH);
-            float barX       = imgOrigin.X + w - sbW - 2f;
-            dl.AddRectFilled(new Vector2(barX, barY), new Vector2(barX + sbW, barY + barH),
-                0x55FFFFFF, 2f);
-        }
-
-        // ── Drag handle + close button — only when title bar is visible ──────
+        // Title bar overlay buttons (drag + close) — placed over the header image
         if (Config.ShowTitleBar)
         {
+            float titleBarH = MeterCanvas.TitleBarH;
+            var dl = ImGui.GetWindowDrawList();
+
             if (!Config.LockWindow)
             {
-                ImGui.SetCursorScreenPos(imgOrigin);
-                ImGui.InvisibleButton("##titleDrag", new Vector2(w - 22f, titleBarH));
+                ImGui.SetCursorScreenPos(_imgOrigin);
+                ImGui.InvisibleButton("##titleDrag", new Vector2(_canvasW - 22f, titleBarH));
                 if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
                     ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
             }
 
-            var closeTL = new Vector2(imgOrigin.X + w - 20f, imgOrigin.Y + 4f);
+            var closeTL = new Vector2(_imgOrigin.X + _canvasW - 20f, _imgOrigin.Y + 4f);
             ImGui.SetCursorScreenPos(closeTL);
             if (ImGui.InvisibleButton("##closeBtn", new Vector2(18f, 18f)))
                 _isVisible = false;
@@ -272,35 +249,69 @@ public sealed class MainWindow : IDisposable
             dl.AddText(closeTL + new Vector2(4f, 2f), hoverClose ? 0xFFFFFFFF : 0x88AAAACC, "x");
         }
 
-        // Restore cursor so DrawToolbar() always renders immediately after the canvas body.
-        ImGui.SetCursorScreenPos(afterCanvasPos);
+        // Restore cursor to end of header so DrawToolbar renders immediately below it
+        ImGui.SetCursorScreenPos(new Vector2(_imgOrigin.X, _imgOrigin.Y + _headerH));
+    }
 
-        // ── Left-click → accordion group toggle (skip when popup is open) ───────
+    // ── Phase 2: draw body slice + scrollbar + hit-test ───────────────────────
+    private void DrawCanvasBody()
+    {
+        if (!_meter.Handle.HasValue) return;
+
+        _bodyOrigin = ImGui.GetCursorScreenPos();
+
+        if (_bodyViewH > 0f)
+        {
+            float availBodyContent = Math.Max(0f, _bodyTexH - _scrollY);
+            float displayBodyH     = Math.Min(_bodyViewH, availBodyContent);
+            if (displayBodyH > 0f)
+            {
+                float uv0y = (_headerH + _scrollY) / _texH;
+                float uv1y = Math.Min(1f, (_headerH + _scrollY + displayBodyH) / _texH);
+                ImGui.Image(_meter.Handle.Value, new Vector2(_canvasW, displayBodyH),
+                    new Vector2(0f, uv0y), new Vector2(1f, uv1y));
+            }
+        }
+
+        var dl = ImGui.GetWindowDrawList();
+
+        // Scrollbar thumb
+        if (_maxScroll > 0f && _bodyViewH > 0f)
+        {
+            const float sbW = 4f;
+            float barH      = Math.Max(20f, _bodyViewH * (_bodyViewH / _bodyTexH));
+            float barY      = _bodyOrigin.Y + (_scrollY / _maxScroll) * (_bodyViewH - barH);
+            float barX      = _imgOrigin.X + _canvasW - sbW - 2f;
+            dl.AddRectFilled(new Vector2(barX, barY), new Vector2(barX + sbW, barY + barH),
+                0x55FFFFFF, 2f);
+        }
+
+        // ── Left-click → accordion group toggle ──────────────────────────────
         if (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !ImGui.IsPopupOpen("##CombatantDetail"))
         {
             var mp = ImGui.GetMousePos();
-            if (mp.X >= imgOrigin.X && mp.X < imgOrigin.X + w &&
-                mp.Y >= bodyOrigin.Y && mp.Y < bodyOrigin.Y + bodyViewH)
+            if (mp.X >= _imgOrigin.X && mp.X < _imgOrigin.X + _canvasW &&
+                mp.Y >= _bodyOrigin.Y && mp.Y < _bodyOrigin.Y + _bodyViewH)
             {
-                float canvasY = (mp.Y - bodyOrigin.Y) + headerH + _scrollY;
+                float canvasY = (mp.Y - _bodyOrigin.Y) + _headerH + _scrollY;
                 var grp = _meter.HitTestGroup(canvasY);
                 if (grp != null) _meter.ToggleGroup(grp);
             }
         }
 
-        // ── Right-click → detail popup ───────────────────────────────────────
-        if (session != null && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+        // ── Right-click → detail popup ────────────────────────────────────────
+        if (_frameSession != null && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
         {
             var mp = ImGui.GetMousePos();
-            if (mp.X >= imgOrigin.X && mp.X < imgOrigin.X + w &&
-                mp.Y >= bodyOrigin.Y && mp.Y < bodyOrigin.Y + bodyViewH)
+            if (mp.X >= _imgOrigin.X && mp.X < _imgOrigin.X + _canvasW &&
+                mp.Y >= _bodyOrigin.Y && mp.Y < _bodyOrigin.Y + _bodyViewH)
             {
-                float canvasY = (mp.Y - bodyOrigin.Y) + headerH + _scrollY;
+                float canvasY = (mp.Y - _bodyOrigin.Y) + _headerH + _scrollY;
                 var hit = _meter.HitTest(canvasY);
                 if (hit != null)
                 {
                     _detailEntityId = hit.EntityId;
-                    _detailSession  = session;
+                    _detailSession  = _frameSession;
                     ImGui.OpenPopup("##CombatantDetail");
                 }
             }
