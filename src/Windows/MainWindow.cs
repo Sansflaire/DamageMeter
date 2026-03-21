@@ -235,6 +235,10 @@ public sealed class MainWindow : IDisposable
             }
         }
 
+        // Save cursor position after the body image — toolbar must render here regardless
+        // of any SetCursorScreenPos calls we make below for invisible hit-test buttons.
+        var afterCanvasPos = ImGui.GetCursorScreenPos();
+
         var dl = ImGui.GetWindowDrawList();
 
         // Scrollbar thumb
@@ -267,6 +271,9 @@ public sealed class MainWindow : IDisposable
             if (hoverClose) dl.AddRectFilled(closeTL, closeTL + new Vector2(18f, 18f), 0x66FF4444);
             dl.AddText(closeTL + new Vector2(4f, 2f), hoverClose ? 0xFFFFFFFF : 0x88AAAACC, "x");
         }
+
+        // Restore cursor so DrawToolbar() always renders immediately after the canvas body.
+        ImGui.SetCursorScreenPos(afterCanvasPos);
 
         // ── Left-click → accordion group toggle (skip when popup is open) ───────
         if (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !ImGui.IsPopupOpen("##CombatantDetail"))
