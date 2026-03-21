@@ -200,6 +200,18 @@ public sealed class MainWindow : IDisposable
         if (hoverClose) dl.AddRectFilled(closeTL, closeTL + new Vector2(18f, 18f), 0x66FF4444);
         dl.AddText(closeTL + new Vector2(4f, 2f), hoverClose ? 0xFFFFFFFF : 0x88AAAACC, "x");
 
+        // ── Left-click → accordion group toggle ──────────────────────────────
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            var mp = ImGui.GetMousePos();
+            if (mp.X >= imgOrigin.X && mp.X < imgOrigin.X + w &&
+                mp.Y >= imgOrigin.Y + titleBarH && mp.Y < imgOrigin.Y + texH)
+            {
+                var grp = _meter.HitTestGroup(mp.Y - imgOrigin.Y);
+                if (grp != null) _meter.ToggleGroup(grp);
+            }
+        }
+
         // ── Right-click → detail popup (skip title bar area) ─────────────────
         if (session != null && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
         {
