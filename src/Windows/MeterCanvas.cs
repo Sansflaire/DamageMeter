@@ -25,7 +25,7 @@ public sealed class MeterCanvas : IDisposable
     private const float EncounterH = 64f;  // encounter info — centered single line
     public  const float HeaderH    = TitleBarH + EncounterH; // 92px total header
     private const float DividerH   =  1f;
-    private const float GroupH     = 30f;  // per-group title row
+    public  const float GroupH     = 30f;  // per-group title row
     public  const float RowH       = 66f;  // per-combatant row (Modern/Classic)
     public  const float MinRowH    = 26f;  // per-combatant row (Minimal — single line)
     private const float GroupGap   =  6f;

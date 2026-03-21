@@ -61,7 +61,20 @@ public sealed class MainWindow : IDisposable
         if (Config.LockWindow)
             flags |= ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize;
 
-        ImGui.SetNextWindowSizeConstraints(new Vector2(300, 120), new Vector2(1000, 3000));
+        // Dynamic min size: always fit at least 4 rows + 1 group header + toolbar + canvas header
+        const float WinPadV  = 10f; // 5px top + 5px bottom window padding
+        const float MinRows  = 4f;
+        const float MinWidth = 280f;
+        float dynHeaderH = MeterCanvas.GetEffectiveHeaderH(new MeterCanvas.DisplayOptions
+        {
+            ShowTitleBar       = Config.ShowTitleBar,
+            ShowEncounterTotal = Config.ShowEncounterTotal,
+        });
+        float dynRowH   = Config.Style == WindowStyle.Minimal ? MeterCanvas.MinRowH : MeterCanvas.RowH;
+        float dynGroupH = Config.ShowGroupHeaders ? MeterCanvas.GroupH : 0f;
+        float minHeight = dynHeaderH + 1f + dynGroupH + MinRows * dynRowH + ToolbarH + WinPadV;
+
+        ImGui.SetNextWindowSizeConstraints(new Vector2(MinWidth, minHeight), new Vector2(1000, 3000));
         ImGui.SetNextWindowSize(new Vector2(420, 380), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowBgAlpha(Config.Opacity);
 
