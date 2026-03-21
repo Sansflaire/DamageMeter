@@ -47,7 +47,7 @@ public sealed class Configuration : IPluginConfiguration
     };
 
     // ── Window ────────────────────────────────────────────────────────────────
-    public WindowStyle Style   { get; set; } = WindowStyle.Classic;
+    public WindowStyle Style   { get; set; } = WindowStyle.Modern;
     public float       Opacity { get; set; } = 0.92f;
     public float       RowHeight { get; set; } = 22f;
 

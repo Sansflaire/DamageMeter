@@ -28,6 +28,10 @@ public sealed class MainWindow : IDisposable
     private uint           _detailEntityId;
     private CombatSession? _detailSession;
 
+    // Scroll state
+    private float _scrollY = 0f;
+    private const float ToolbarH = 26f;
+
     // ── Constructor ───────────────────────────────────────────────────────────
     public MainWindow(Plugin plugin)
     {
@@ -50,11 +54,15 @@ public sealed class MainWindow : IDisposable
         ImGui.SetNextWindowSize(new Vector2(420, 380), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowBgAlpha(Config.Opacity);
 
-        // Zero padding so the canvas image is flush with the window edges
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing,   Vector2.Zero);
+        const float WinPad = 5f;
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding,  new Vector2(WinPad, WinPad));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing,    Vector2.Zero);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.5f);
+        ImGui.PushStyleColor(ImGuiCol.Border,    new Vector4(0.38f, 0.22f, 0.24f, 0.90f));
+        ImGui.PushStyleColor(ImGuiCol.WindowBg,  new Vector4(0x10 / 255f, 0x0C / 255f, 0x0D / 255f, 1f));
         bool open = ImGui.Begin("###DamageMeterMain", ref _isVisible, flags);
-        ImGui.PopStyleVar(2);
+        ImGui.PopStyleVar(3);
+        ImGui.PopStyleColor(2);
 
         if (!open) { ImGui.End(); return; }
 
@@ -172,15 +180,54 @@ public sealed class MainWindow : IDisposable
 
         _meter.Render(w, session, groups, metric, dur, pinned, localEntityId, opts);
 
-        float texH       = _meter.TotalHeight > 0 ? _meter.TotalHeight : 40f;
-        float titleBarH  = MeterCanvas.TitleBarH;
-        var   imgOrigin  = ImGui.GetCursorScreenPos();
+        float texH      = _meter.TotalHeight > 0 ? _meter.TotalHeight : 40f;
+        float headerH   = MeterCanvas.HeaderH;
+        float titleBarH = MeterCanvas.TitleBarH;
+
+        // Split into fixed header + scrollable body
+        float bodyTexH  = Math.Max(0f, texH - headerH);
+        float bodyViewH = Math.Max(0f, avail.Y - ToolbarH - headerH);
+        float maxScroll = Math.Max(0f, bodyTexH - bodyViewH);
+
+        // Mouse wheel scrolling
+        if (ImGui.IsWindowHovered() && maxScroll > 0f)
+        {
+            float wheel = ImGui.GetIO().MouseWheel;
+            if (wheel != 0f)
+                _scrollY = Math.Clamp(_scrollY - wheel * MeterCanvas.RowH, 0f, maxScroll);
+        }
+        _scrollY = Math.Clamp(_scrollY, 0f, maxScroll);
 
         if (!_meter.Handle.HasValue) { ImGui.TextDisabled("Rendering…"); return; }
 
-        ImGui.Image(_meter.Handle.Value, new Vector2(w, texH));
+        var imgOrigin = ImGui.GetCursorScreenPos();
+
+        // Fixed header slice
+        ImGui.Image(_meter.Handle.Value, new Vector2(w, headerH),
+            new Vector2(0f, 0f), new Vector2(1f, headerH / texH));
+
+        // Scrollable body slice
+        var bodyOrigin = ImGui.GetCursorScreenPos();
+        if (bodyViewH > 0f)
+        {
+            float uv0y = (headerH + _scrollY) / texH;
+            float uv1y = Math.Min(1f, (headerH + _scrollY + bodyViewH) / texH);
+            ImGui.Image(_meter.Handle.Value, new Vector2(w, bodyViewH),
+                new Vector2(0f, uv0y), new Vector2(1f, uv1y));
+        }
 
         var dl = ImGui.GetWindowDrawList();
+
+        // Scrollbar thumb
+        if (maxScroll > 0f && bodyViewH > 0f)
+        {
+            const float sbW  = 4f;
+            float barH       = Math.Max(20f, bodyViewH * (bodyViewH / bodyTexH));
+            float barY       = bodyOrigin.Y + (_scrollY / maxScroll) * (bodyViewH - barH);
+            float barX       = imgOrigin.X + w - sbW - 2f;
+            dl.AddRectFilled(new Vector2(barX, barY), new Vector2(barX + sbW, barY + barH),
+                0x55FFFFFF, 2f);
+        }
 
         // ── Drag handle over title bar (leaves 22px for close button) ──────
         if (!Config.LockWindow)
@@ -200,26 +247,28 @@ public sealed class MainWindow : IDisposable
         if (hoverClose) dl.AddRectFilled(closeTL, closeTL + new Vector2(18f, 18f), 0x66FF4444);
         dl.AddText(closeTL + new Vector2(4f, 2f), hoverClose ? 0xFFFFFFFF : 0x88AAAACC, "x");
 
-        // ── Left-click → accordion group toggle ──────────────────────────────
-        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        // ── Left-click → accordion group toggle (skip when popup is open) ───────
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !ImGui.IsPopupOpen("##CombatantDetail"))
         {
             var mp = ImGui.GetMousePos();
             if (mp.X >= imgOrigin.X && mp.X < imgOrigin.X + w &&
-                mp.Y >= imgOrigin.Y + titleBarH && mp.Y < imgOrigin.Y + texH)
+                mp.Y >= bodyOrigin.Y && mp.Y < bodyOrigin.Y + bodyViewH)
             {
-                var grp = _meter.HitTestGroup(mp.Y - imgOrigin.Y);
+                float canvasY = (mp.Y - bodyOrigin.Y) + headerH + _scrollY;
+                var grp = _meter.HitTestGroup(canvasY);
                 if (grp != null) _meter.ToggleGroup(grp);
             }
         }
 
-        // ── Right-click → detail popup (skip title bar area) ─────────────────
+        // ── Right-click → detail popup ───────────────────────────────────────
         if (session != null && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
         {
             var mp = ImGui.GetMousePos();
             if (mp.X >= imgOrigin.X && mp.X < imgOrigin.X + w &&
-                mp.Y >= imgOrigin.Y + titleBarH && mp.Y < imgOrigin.Y + texH)
+                mp.Y >= bodyOrigin.Y && mp.Y < bodyOrigin.Y + bodyViewH)
             {
-                var hit = _meter.HitTest(mp.Y - imgOrigin.Y);
+                float canvasY = (mp.Y - bodyOrigin.Y) + headerH + _scrollY;
+                var hit = _meter.HitTest(canvasY);
                 if (hit != null)
                 {
                     _detailEntityId = hit.EntityId;
