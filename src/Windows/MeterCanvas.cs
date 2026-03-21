@@ -58,20 +58,20 @@ public sealed class MeterCanvas : IDisposable
     private const float FtValue  = 17f;
 
     // ── Color palette ─────────────────────────────────────────────────────────
-    // Backgrounds
-    private static readonly SKColor BgDeep    = new(0x08, 0x08, 0x12, 0xFF);
-    private static readonly SKColor BgEven    = new(0x0B, 0x0B, 0x18, 0xFF);
-    private static readonly SKColor BgOdd     = new(0x0F, 0x0F, 0x1E, 0xFF);
-    private static readonly SKColor BgGroup   = new(0x12, 0x12, 0x28, 0xFF);
-    private static readonly SKColor BgHeader1 = new(0x0C, 0x0C, 0x22, 0xFF);
-    private static readonly SKColor BgHeader2 = new(0x10, 0x10, 0x2A, 0xFF);
+    // Backgrounds — dark navy, not near-black
+    private static readonly SKColor BgDeep    = new(0x0C, 0x0E, 0x1C, 0xFF);
+    private static readonly SKColor BgEven    = new(0x12, 0x16, 0x28, 0xFF);
+    private static readonly SKColor BgOdd     = new(0x18, 0x1C, 0x32, 0xFF);
+    private static readonly SKColor BgGroup   = new(0x1A, 0x1E, 0x36, 0xFF);
+    private static readonly SKColor BgHeader1 = new(0x10, 0x12, 0x28, 0xFF);
+    private static readonly SKColor BgHeader2 = new(0x14, 0x18, 0x30, 0xFF);
 
     // Text
     private static readonly SKColor TextPrim   = SKColors.White;
-    private static readonly SKColor TextMuted  = new(0x80, 0x80, 0xAA, 0xFF);
-    private static readonly SKColor TextDim    = new(0x50, 0x50, 0x70, 0xFF);
+    private static readonly SKColor TextMuted  = new(0xA0, 0xA0, 0xC8, 0xFF);
+    private static readonly SKColor TextDim    = new(0x70, 0x70, 0x90, 0xFF);
     private static readonly SKColor TextLive   = new(0x30, 0xFF, 0x70, 0xFF);
-    private static readonly SKColor TextEnded  = new(0x70, 0x70, 0x90, 0xFF);
+    private static readonly SKColor TextEnded  = new(0x90, 0x90, 0xB0, 0xFF);
     private static readonly SKColor TextTimer  = new(0xFF, 0xCC, 0x44, 0xFF);
     private static readonly SKColor TextZone   = new(0xCC, 0xCC, 0xFF, 0xFF);
 
@@ -427,10 +427,9 @@ public sealed class MeterCanvas : IDisposable
         SKColor accent, int w, float y, double val, double pct, MeterType metric,
         uint localEntityId, DisplayOptions opts)
     {
-        bool    isLocal   = localEntityId != 0 && c.EntityId == localEntityId;
-        bool    isFriendly = c.Type == CombatantType.PartyMember || c.Type == CombatantType.FriendlyPlayer;
-        SKColor barColor  = isLocal ? LocalAccent : isFriendly ? PaletteFor(rank) : EnemyBarCol;
-        SKColor rankCol   = isLocal ? LocalAccent : RankColor(rank, accent);
+        bool    isLocal  = localEntityId != 0 && c.EntityId == localEntityId;
+        SKColor barColor = EnsureBright(AbgrToSkColor(opts.BarColorAbgr));
+        SKColor rankCol  = isLocal ? LocalAccent : RankColor(rank, accent);
 
         // Content sits in the upper portion, bar at bottom
         float contentMidY = y + (RowH - BarH - 2f) * 0.5f;
@@ -444,7 +443,7 @@ public sealed class MeterCanvas : IDisposable
         canvas.DrawRect(SKRect.Create(0, y, w, RowH), _p);
 
         // 2. Full-width ghost track so empty space shows the scale
-        _p.Color = new SKColor(barColor.Red, barColor.Green, barColor.Blue, 0x30);
+        _p.Color = new SKColor(barColor.Red, barColor.Green, barColor.Blue, 0x50);
         canvas.DrawRect(SKRect.Create(StripeW, y + RowH - BarH - 2f, w - StripeW, BarH), _p);
 
         // 3. Fill bar strip at bottom of row
@@ -668,6 +667,20 @@ public sealed class MeterCanvas : IDisposable
     // ABGR uint (Dalamud/ImGui format) → SKColor (RGBA)
     private static SKColor AbgrToSkColor(uint abgr) =>
         new((byte)(abgr & 0xFF), (byte)((abgr >> 8) & 0xFF), (byte)((abgr >> 16) & 0xFF), (byte)((abgr >> 24) & 0xFF));
+
+    // Scale up a color so its brightest channel is at least minMax, preserving hue
+    private static SKColor EnsureBright(SKColor c, byte minMax = 150)
+    {
+        byte max = Math.Max(c.Red, Math.Max(c.Green, c.Blue));
+        if (max >= minMax) return c;
+        if (max == 0) return new SKColor(minMax, minMax, minMax, c.Alpha);
+        float scale = (float)minMax / max;
+        return new SKColor(
+            (byte)Math.Min(255, c.Red   * scale),
+            (byte)Math.Min(255, c.Green * scale),
+            (byte)Math.Min(255, c.Blue  * scale),
+            c.Alpha);
+    }
 
     private static string FormatVal(long v, MeterType m) =>
         m is MeterType.DPS or MeterType.HPS

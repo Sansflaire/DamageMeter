@@ -21,10 +21,10 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Download Dalamud (staging)
+      - name: Download Dalamud
         shell: pwsh
         run: |
-          Invoke-WebRequest "https://github.com/goatcorp/dalamud-distrib/raw/main/stg/latest.zip" -OutFile dalamud.zip
+          Invoke-WebRequest "https://github.com/goatcorp/dalamud-distrib/raw/main/latest.zip" -OutFile dalamud.zip
           Expand-Archive dalamud.zip -DestinationPath C:\dalamud
 
       - name: Restore
@@ -52,10 +52,15 @@ jobs:
         run: |
           $out = "pack"
           New-Item -ItemType Directory $out | Out-Null
-          Copy-Item src/bin/x64/Release/DamageMeter.dll $out/
-          Copy-Item src/bin/x64/Release/SkiaSharp.dll   $out/ -ErrorAction SilentlyContinue
-          Copy-Item src/bin/x64/Release/libSkiaSharp.dll $out/ -ErrorAction SilentlyContinue
+          $releaseDir = "src/bin/x64/Release"
+          Copy-Item "$releaseDir/DamageMeter.dll" $out/
+          # SkiaSharp managed wrapper
+          Copy-Item "$releaseDir/SkiaSharp.dll" $out/ -ErrorAction SilentlyContinue
+          # libSkiaSharp native — may be at output root or in runtimes subdirectory
+          $native = Get-ChildItem "$releaseDir" -Recurse -Filter "libSkiaSharp.dll" | Select-Object -First 1
+          if ($native) { Copy-Item $native.FullName $out/ } else { Write-Error "libSkiaSharp.dll not found in build output" }
           Copy-Item DamageMeter.json $out/
+          Write-Host "Pack contents:"; Get-ChildItem $out | Format-Table Name, Length
           Compress-Archive -Path $out/* -DestinationPath DamageMeter.zip
 
       - name: Create/update GitHub release
