@@ -51,16 +51,18 @@ jobs:
         shell: pwsh
         run: |
           $out = "pack"
-          New-Item -ItemType Directory $out | Out-Null
           $releaseDir = "src/bin/x64/Release"
+          New-Item -ItemType Directory $out | Out-Null
           Copy-Item "$releaseDir/DamageMeter.dll" $out/
-          # SkiaSharp managed wrapper
-          Copy-Item "$releaseDir/SkiaSharp.dll" $out/ -ErrorAction SilentlyContinue
-          # libSkiaSharp native — may be at output root or in runtimes subdirectory
-          $native = Get-ChildItem "$releaseDir" -Recurse -Filter "libSkiaSharp.dll" | Select-Object -First 1
-          if ($native) { Copy-Item $native.FullName $out/ } else { Write-Error "libSkiaSharp.dll not found in build output" }
+          Copy-Item "$releaseDir/SkiaSharp.dll"   $out/ -ErrorAction SilentlyContinue
+          # Preserve runtimes/ subfolder so .NET native DLL resolution works
+          if (Test-Path "$releaseDir/runtimes") {
+            Copy-Item "$releaseDir/runtimes" $out/runtimes -Recurse
+          } else {
+            Write-Error "runtimes/ folder not found — libSkiaSharp.dll will be missing"
+          }
           Copy-Item DamageMeter.json $out/
-          Write-Host "Pack contents:"; Get-ChildItem $out | Format-Table Name, Length
+          Write-Host "Pack contents:"; Get-ChildItem $out -Recurse | Format-Table FullName, Length
           Compress-Archive -Path $out/* -DestinationPath DamageMeter.zip
 
       - name: Create/update GitHub release
