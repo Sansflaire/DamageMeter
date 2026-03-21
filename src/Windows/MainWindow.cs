@@ -154,8 +154,8 @@ public sealed class MainWindow : IDisposable
             var enemies  = session.GetSortedByType(metric, CombatantType.Enemy);
 
             if (party.Count    > 0) groups.Add(new MeterCanvas.GroupData { Label = "Party",    Combatants = party,    Accent = MeterCanvas.GroupAccent(CombatantType.PartyMember) });
-            if (friendly.Count > 0) groups.Add(new MeterCanvas.GroupData { Label = "Friendly", Combatants = friendly, Accent = MeterCanvas.GroupAccent(CombatantType.FriendlyPlayer) });
-            if (enemies.Count  > 0) groups.Add(new MeterCanvas.GroupData { Label = "Enemies",  Combatants = enemies,  Accent = MeterCanvas.GroupAccent(CombatantType.Enemy) });
+            if (friendly.Count > 0 && Config.ShowFriendlyGroup) groups.Add(new MeterCanvas.GroupData { Label = "Friendly", Combatants = friendly, Accent = MeterCanvas.GroupAccent(CombatantType.FriendlyPlayer) });
+            if (enemies.Count  > 0 && Config.ShowEnemyGroup)    groups.Add(new MeterCanvas.GroupData { Label = "Enemies",  Combatants = enemies,  Accent = MeterCanvas.GroupAccent(CombatantType.Enemy) });
 
             // Unknown-type fallback for historical sessions
             if (groups.Count == 0 && session.Combatants.Count > 0)
@@ -168,6 +168,8 @@ public sealed class MainWindow : IDisposable
             }
         }
 
+        const float SbTrackW = 8f; // scrollbar track width reserved in canvas
+
         var opts = new MeterCanvas.DisplayOptions
         {
             ShowFullName     = Config.ShowFullName,
@@ -176,13 +178,25 @@ public sealed class MainWindow : IDisposable
             ShowPercentage   = Config.ShowPercentage,
             BarColorAbgr     = Config.GetBarColor(metric),
             Style            = Config.Style,
+            ShowEncounterTotal = Config.ShowEncounterTotal,
+            ShowGroupHeaders   = Config.ShowGroupHeaders,
+            ShowTitleBar       = Config.ShowTitleBar,
         };
 
-        _meter.Render(w, session, groups, metric, dur, pinned, localEntityId, opts);
+        // Pre-render at zero scrollbar width to measure scroll need, then re-render with margin.
+        // Simpler: always reserve SbTrackW when content taller than view (detected last frame).
+        float headerH   = MeterCanvas.GetEffectiveHeaderH(opts);
+        float titleBarH = Config.ShowTitleBar ? MeterCanvas.TitleBarH : 0f;
 
+        // Compute tentative scroll metrics from last frame's TotalHeight
         float texH      = _meter.TotalHeight > 0 ? _meter.TotalHeight : 40f;
-        float headerH   = MeterCanvas.HeaderH;
-        float titleBarH = MeterCanvas.TitleBarH;
+        float bodyTexH0 = Math.Max(0f, texH - headerH);
+        float bodyViewH0 = Math.Max(0f, avail.Y - ToolbarH - headerH);
+        bool  needsScrollbar = bodyTexH0 > bodyViewH0;
+        opts.ScrollbarW = needsScrollbar ? SbTrackW : 0f;
+
+        _meter.Render(w, session, groups, metric, dur, pinned, localEntityId, opts);
+        texH = _meter.TotalHeight > 0 ? _meter.TotalHeight : 40f; // use this frame's height
 
         // Split into fixed header + scrollable body
         float bodyTexH  = Math.Max(0f, texH - headerH);
@@ -206,14 +220,19 @@ public sealed class MainWindow : IDisposable
         ImGui.Image(_meter.Handle.Value, new Vector2(w, headerH),
             new Vector2(0f, 0f), new Vector2(1f, headerH / texH));
 
-        // Scrollable body slice
+        // Scrollable body slice — clamp display height to actual canvas content
         var bodyOrigin = ImGui.GetCursorScreenPos();
         if (bodyViewH > 0f)
         {
-            float uv0y = (headerH + _scrollY) / texH;
-            float uv1y = Math.Min(1f, (headerH + _scrollY + bodyViewH) / texH);
-            ImGui.Image(_meter.Handle.Value, new Vector2(w, bodyViewH),
-                new Vector2(0f, uv0y), new Vector2(1f, uv1y));
+            float availBodyContent = Math.Max(0f, bodyTexH - _scrollY);
+            float displayBodyH     = Math.Min(bodyViewH, availBodyContent);
+            if (displayBodyH > 0f)
+            {
+                float uv0y = (headerH + _scrollY) / texH;
+                float uv1y = Math.Min(1f, (headerH + _scrollY + displayBodyH) / texH);
+                ImGui.Image(_meter.Handle.Value, new Vector2(w, displayBodyH),
+                    new Vector2(0f, uv0y), new Vector2(1f, uv1y));
+            }
         }
 
         var dl = ImGui.GetWindowDrawList();
@@ -229,23 +248,25 @@ public sealed class MainWindow : IDisposable
                 0x55FFFFFF, 2f);
         }
 
-        // ── Drag handle over title bar (leaves 22px for close button) ──────
-        if (!Config.LockWindow)
+        // ── Drag handle + close button — only when title bar is visible ──────
+        if (Config.ShowTitleBar)
         {
-            ImGui.SetCursorScreenPos(imgOrigin);
-            ImGui.InvisibleButton("##titleDrag", new Vector2(w - 22f, titleBarH));
-            if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
-                ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
-        }
+            if (!Config.LockWindow)
+            {
+                ImGui.SetCursorScreenPos(imgOrigin);
+                ImGui.InvisibleButton("##titleDrag", new Vector2(w - 22f, titleBarH));
+                if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+                    ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
+            }
 
-        // ── Close button (top-right of title bar) ────────────────────────────
-        var closeTL = new Vector2(imgOrigin.X + w - 20f, imgOrigin.Y + 4f);
-        ImGui.SetCursorScreenPos(closeTL);
-        if (ImGui.InvisibleButton("##closeBtn", new Vector2(18f, 18f)))
-            _isVisible = false;
-        bool hoverClose = ImGui.IsItemHovered();
-        if (hoverClose) dl.AddRectFilled(closeTL, closeTL + new Vector2(18f, 18f), 0x66FF4444);
-        dl.AddText(closeTL + new Vector2(4f, 2f), hoverClose ? 0xFFFFFFFF : 0x88AAAACC, "x");
+            var closeTL = new Vector2(imgOrigin.X + w - 20f, imgOrigin.Y + 4f);
+            ImGui.SetCursorScreenPos(closeTL);
+            if (ImGui.InvisibleButton("##closeBtn", new Vector2(18f, 18f)))
+                _isVisible = false;
+            bool hoverClose = ImGui.IsItemHovered();
+            if (hoverClose) dl.AddRectFilled(closeTL, closeTL + new Vector2(18f, 18f), 0x66FF4444);
+            dl.AddText(closeTL + new Vector2(4f, 2f), hoverClose ? 0xFFFFFFFF : 0x88AAAACC, "x");
+        }
 
         // ── Left-click → accordion group toggle (skip when popup is open) ───────
         if (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !ImGui.IsPopupOpen("##CombatantDetail"))
@@ -282,7 +303,7 @@ public sealed class MainWindow : IDisposable
     // ── Detail popup (right-click) ────────────────────────────────────────────
     private void DrawDetailPopup()
     {
-        ImGui.SetNextWindowSize(new Vector2(560, 560), ImGuiCond.Appearing);
+        ImGui.SetNextWindowSize(new Vector2(560, 560), ImGuiCond.Always);
         if (!ImGui.BeginPopup("##CombatantDetail", ImGuiWindowFlags.NoResize)) return;
 
         if (_detailSession == null
@@ -360,7 +381,7 @@ public sealed class MainWindow : IDisposable
 
         int colCount = showOverheal ? 7 : 6;
         if (!ImGui.BeginTable("##AbilityTable", colCount, tableFlags,
-            new Vector2(0, ImGui.GetContentRegionAvail().Y - 4))) return;
+            new Vector2(0, 380f))) return;
 
         ImGui.TableSetupScrollFreeze(0, 1);
         ImGui.TableSetupColumn("Ability",  ImGuiTableColumnFlags.WidthStretch);

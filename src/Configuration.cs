@@ -32,6 +32,18 @@ public sealed class Configuration : IPluginConfiguration
     /// Lock the window in place (no dragging/resizing).
     public bool LockWindow      { get; set; } = false;
 
+    // ── Filters ───────────────────────────────────────────────────────────────
+    /// Include enemy combatants in the meter.
+    public bool ShowEnemyGroup     { get; set; } = true;
+    /// Include friendly (non-party) players in the meter.
+    public bool ShowFriendlyGroup  { get; set; } = true;
+    /// Show "Total X:" stat line in the encounter header.
+    public bool ShowEncounterTotal { get; set; } = true;
+    /// Show group accordion headers (Party / Friendly / Enemies).
+    public bool ShowGroupHeaders   { get; set; } = true;
+    /// Show the "DAMAGE METER" title bar strip at the top.
+    public bool ShowTitleBar       { get; set; } = true;
+
     // ── Colors (ImGui ABGR uint — 0xAABBGGRR) ────────────────────────────────
     // Default: red for damage, green for healing, blue for damage taken,
     //          teal for overhealing, orange for avoidable damage.

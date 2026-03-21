@@ -38,6 +38,7 @@ public sealed class SettingsWindow : IDisposable
         if (ImGui.BeginTabBar("##SettingsTabs"))
         {
             if (ImGui.BeginTabItem("Display"))    { DrawDisplayTab();    ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Filters"))    { DrawFiltersTab();    ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Bar Colors")) { DrawColorsTab();     ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Window"))     { DrawWindowTab();     ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("History"))    { DrawHistoryTab();    ImGui.EndTabItem(); }
@@ -114,6 +115,52 @@ public sealed class SettingsWindow : IDisposable
         if (ImGui.SliderFloat("Row height (px)", ref rowH, 16f, 40f))
         {
             Config.RowHeight = rowH;
+            Save();
+        }
+    }
+
+    // ── Filters tab ───────────────────────────────────────────────────────────
+    private void DrawFiltersTab()
+    {
+        ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "Groups");
+        ImGui.Separator();
+
+        var showEnemy = Config.ShowEnemyGroup;
+        if (ImGui.Checkbox("Show enemy group", ref showEnemy))
+        {
+            Config.ShowEnemyGroup = showEnemy;
+            Save();
+        }
+
+        var showFriendly = Config.ShowFriendlyGroup;
+        if (ImGui.Checkbox("Show friendly (non-party) group", ref showFriendly))
+        {
+            Config.ShowFriendlyGroup = showFriendly;
+            Save();
+        }
+
+        var showGroupHeaders = Config.ShowGroupHeaders;
+        if (ImGui.Checkbox("Show group accordion headers", ref showGroupHeaders))
+        {
+            Config.ShowGroupHeaders = showGroupHeaders;
+            Save();
+        }
+
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "Header");
+        ImGui.Separator();
+
+        var showTitleBar = Config.ShowTitleBar;
+        if (ImGui.Checkbox("Show title bar (\"DAMAGE METER\" strip)", ref showTitleBar))
+        {
+            Config.ShowTitleBar = showTitleBar;
+            Save();
+        }
+
+        var showTotal = Config.ShowEncounterTotal;
+        if (ImGui.Checkbox("Show total stat line in encounter header", ref showTotal))
+        {
+            Config.ShowEncounterTotal = showTotal;
             Save();
         }
     }

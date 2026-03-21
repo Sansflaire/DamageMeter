@@ -114,7 +114,15 @@ public sealed class MeterCanvas : IDisposable
         public bool ShowPercentage;
         public uint BarColorAbgr;
         public WindowStyle Style;
+        public bool  ShowEncounterTotal;
+        public bool  ShowGroupHeaders;
+        public bool  ShowTitleBar;
+        public float ScrollbarW; // reserved right margin when scrollbar is visible (px)
     }
+
+    // ── Dynamic header height ─────────────────────────────────────────────────
+    public static float GetEffectiveHeaderH(DisplayOptions opts)
+        => (opts.ShowTitleBar ? TitleBarH : 0f) + EncounterH;
 
     // ── Group input ───────────────────────────────────────────────────────────
     public struct GroupData
@@ -147,6 +155,7 @@ public sealed class MeterCanvas : IDisposable
     // Slide-in — triggered when a new combatant first appears
     private readonly HashSet<uint>           _seenEntities  = new();
     private readonly Dictionary<uint, float> _slideProgress = new(); // 0→1
+    private MeterType                        _prevMetric    = (MeterType)(-1);
 
     // Accordion — per-group collapse/expand animation
     private readonly Dictionary<string, bool>  _groupCollapsed = new(); // true = collapsed
@@ -167,6 +176,17 @@ public sealed class MeterCanvas : IDisposable
         dt = Math.Min(dt, 0.1f); // cap at 100ms to avoid jumps after pause
         _lastRenderTick = now;
         _animTime += dt;
+
+        // ── On metric change: pre-mark all current combatants as seen ─────────
+        // This prevents slide-in animation from triggering when switching metrics.
+        if (metric != _prevMetric)
+        {
+            _prevMetric = metric;
+            foreach (var g in groups)
+                foreach (var c in g.Combatants)
+                    _seenEntities.Add(c.EntityId);
+            _slideProgress.Clear();
+        }
 
         // ── Detect new entities (slide-in) ────────────────────────────────────
         foreach (var g in groups)
@@ -222,8 +242,9 @@ public sealed class MeterCanvas : IDisposable
         _hitRows.Clear();
         _groupHits.Clear();
 
+        float effectiveHeaderH = GetEffectiveHeaderH(opts);
         float rowH   = opts.Style == WindowStyle.Minimal ? MinRowH : RowH;
-        float totalH = ComputeHeight(groups, session, rowH);
+        float totalH = ComputeHeight(groups, session, rowH, opts.ShowGroupHeaders, effectiveHeaderH);
         TotalHeight = totalH;
 
         int w = Math.Max(1, width);
@@ -244,8 +265,8 @@ public sealed class MeterCanvas : IDisposable
             foreach (var c in g.Combatants)
                 groupTotal += c.GetValue(metric, dur);
 
-        DrawEncounterHeader(canvas, session, w, metric, dur, isPinned, groupTotal, opts);
-        float y = HeaderH + DividerH;
+        DrawEncounterHeader(canvas, session, w, metric, dur, isPinned, groupTotal, opts, effectiveHeaderH);
+        float y = effectiveHeaderH + DividerH;
 
         bool firstGroup = true;
         foreach (var group in groups)
@@ -259,10 +280,13 @@ public sealed class MeterCanvas : IDisposable
 
             double topVal = group.Combatants.Max(c => c.GetValue(metric, dur));
 
-            DrawGroupHeader(canvas, group, w, y, topVal, metric, dur, opts, collapsed, expandT);
-            _groupHits.Add((y, GroupH, group.Label));
-            _hitRows.Add((y, GroupH, null));
-            y += GroupH;
+            if (opts.ShowGroupHeaders)
+            {
+                DrawGroupHeader(canvas, group, w, y, topVal, metric, dur, opts, collapsed, expandT);
+                _groupHits.Add((y, GroupH, group.Label));
+                _hitRows.Add((y, GroupH, null));
+                y += GroupH;
+            }
 
             if (expandT > 0.001f)
             {
@@ -292,7 +316,7 @@ public sealed class MeterCanvas : IDisposable
 
         if (firstGroup)
         {
-            float msgY = HeaderH + DividerH + 24f;
+            float msgY = effectiveHeaderH + DividerH + 24f;
             Draw(canvas, "No encounter data yet.", w / 2f, msgY, FtSub, false, TextMuted, Align.Center);
         }
 
@@ -327,9 +351,9 @@ public sealed class MeterCanvas : IDisposable
     }
 
     // ── Height computation (respects accordion) ────────────────────────────────
-    private float ComputeHeight(List<GroupData> groups, CombatSession? session, float rowH)
+    private float ComputeHeight(List<GroupData> groups, CombatSession? session, float rowH, bool showGroupHeaders, float headerH)
     {
-        float h = HeaderH + DividerH;
+        float h = headerH + DividerH;
         bool first = true;
         foreach (var g in groups)
         {
@@ -337,7 +361,8 @@ public sealed class MeterCanvas : IDisposable
             if (!first) h += GroupGap;
             first = false;
             float expandT = _groupExpandT.TryGetValue(g.Label, out float et) ? et : 1f;
-            h += GroupH + g.Combatants.Count * rowH * expandT;
+            if (showGroupHeaders) h += GroupH;
+            h += g.Combatants.Count * rowH * expandT;
         }
         if (first && session != null) h += 30f;
         return h;
@@ -345,50 +370,54 @@ public sealed class MeterCanvas : IDisposable
 
     // ── Encounter header ──────────────────────────────────────────────────────
     private void DrawEncounterHeader(SKCanvas canvas, CombatSession? session, int w, MeterType metric,
-                                     double dur, bool isPinned, double groupTotal, DisplayOptions opts)
+                                     double dur, bool isPinned, double groupTotal, DisplayOptions opts,
+                                     float effectiveHeaderH)
     {
-        bool isMinimal = opts.Style == WindowStyle.Minimal;
-        bool isModern  = opts.Style == WindowStyle.Modern;
+        bool isMinimal    = opts.Style == WindowStyle.Minimal;
+        bool showTitleBar = opts.ShowTitleBar;
 
-        // Title bar — dark warm metallic (same palette across all styles)
-        if (isMinimal)
+        if (showTitleBar)
         {
-            _p.Color = new SKColor(0x0E, 0x0A, 0x0B, 0xFF);
-            canvas.DrawRect(SKRect.Create(0, 0, w, TitleBarH), _p);
+            // Title bar — dark warm metallic
+            if (isMinimal)
+            {
+                _p.Color = new SKColor(0x0E, 0x0A, 0x0B, 0xFF);
+                canvas.DrawRect(SKRect.Create(0, 0, w, TitleBarH), _p);
+            }
+            else
+            {
+                _p.Shader = SKShader.CreateLinearGradient(
+                    new SKPoint(0, 0), new SKPoint(w, 0),
+                    new[] { new SKColor(0x22, 0x18, 0x1A, 0xFF), new SKColor(0x18, 0x14, 0x16, 0xFF) },
+                    SKShaderTileMode.Clamp);
+                canvas.DrawRect(SKRect.Create(0, 0, w, TitleBarH), _p);
+                _p.Shader = null;
+            }
+
+            // Top-edge specular stripe
+            if (!isMinimal)
+            {
+                _p.Shader = SKShader.CreateLinearGradient(
+                    new SKPoint(0, 0), new SKPoint(w, 0),
+                    new[] { new SKColor(0xC8, 0x78, 0x60, 0xFF), new SKColor(0xA0, 0x70, 0x78, 0xFF) },
+                    SKShaderTileMode.Clamp);
+                canvas.DrawRect(SKRect.Create(0, 0, w, 2f), _p);
+                _p.Shader = null;
+            }
+
+            float titleMidY = TitleBarH * 0.5f + 1f;
+            if (!isMinimal)
+                Draw(canvas, "DAMAGE METER", w * 0.5f, titleMidY, 11f, true, new SKColor(0xD8, 0xC4, 0xC6, 0xCC), Align.Center);
+            if (isPinned)
+                Draw(canvas, "PINNED", w - 6f, titleMidY, FtSub, true, new SKColor(0xFF, 0xCC, 0x44, 0xFF), Align.Right);
+
+            // Bottom border of title bar
+            _p.Color = new SKColor(0x38, 0x28, 0x2A, 0xFF);
+            canvas.DrawRect(SKRect.Create(0, TitleBarH - 1f, w, 1f), _p);
         }
-        else
-        {
-            _p.Shader = SKShader.CreateLinearGradient(
-                new SKPoint(0, 0), new SKPoint(w, 0),
-                new[] { new SKColor(0x22, 0x18, 0x1A, 0xFF), new SKColor(0x18, 0x14, 0x16, 0xFF) },
-                SKShaderTileMode.Clamp);
-            canvas.DrawRect(SKRect.Create(0, 0, w, TitleBarH), _p);
-            _p.Shader = null;
-        }
 
-        // Top-edge specular stripe (rose-gold → dusty rose)
-        if (!isMinimal)
-        {
-            _p.Shader = SKShader.CreateLinearGradient(
-                new SKPoint(0, 0), new SKPoint(w, 0),
-                new[] { new SKColor(0xC8, 0x78, 0x60, 0xFF), new SKColor(0xA0, 0x70, 0x78, 0xFF) },
-                SKShaderTileMode.Clamp);
-            canvas.DrawRect(SKRect.Create(0, 0, w, 2f), _p);
-            _p.Shader = null;
-        }
-
-        float titleMidY = TitleBarH * 0.5f + 1f;
-        if (!isMinimal)
-            Draw(canvas, "DAMAGE METER", w * 0.5f, titleMidY, 11f, true, new SKColor(0xD8, 0xC4, 0xC6, 0xCC), Align.Center);
-        if (isPinned)
-            Draw(canvas, "PINNED", w - 6f, titleMidY, FtSub, true, new SKColor(0xFF, 0xCC, 0x44, 0xFF), Align.Right);
-
-        // Bottom border of title bar
-        _p.Color = new SKColor(0x38, 0x28, 0x2A, 0xFF);
-        canvas.DrawRect(SKRect.Create(0, TitleBarH - 1f, w, 1f), _p);
-
-        // Encounter header
-        float encY = TitleBarH;
+        // Encounter area starts after title bar (or at 0 if title bar hidden)
+        float encY = showTitleBar ? TitleBarH : 0f;
         if (isMinimal)
         {
             _p.Color = new SKColor(0x12, 0x0E, 0x0F, 0xFF);
@@ -406,7 +435,7 @@ public sealed class MeterCanvas : IDisposable
 
         // Bottom divider
         _p.Color = new SKColor(0x3A, 0x28, 0x2A, 0xFF);
-        canvas.DrawRect(SKRect.Create(0, HeaderH, w, DividerH), _p);
+        canvas.DrawRect(SKRect.Create(0, effectiveHeaderH, w, DividerH), _p);
 
         if (session == null)
         {
@@ -423,22 +452,30 @@ public sealed class MeterCanvas : IDisposable
         Draw(canvas, statusDot,        cx - 4f, subY, 9f,    false, dotCol,    Align.Right);
         Draw(canvas, session.ZoneName, cx,      subY, FtZone, false, TextMuted, Align.Left);
 
-        string metricLabel = $"Total {metric.DisplayName()}:";
-        string bigVal      = groupTotal > 0 ? FormatVal((long)groupTotal, metric) : "—";
-        string timerStr    = $"  ({session.FormattedDuration})";
+        if (opts.ShowEncounterTotal)
+        {
+            string metricLabel = $"Total {metric.DisplayName()}:";
+            string bigVal      = groupTotal > 0 ? FormatVal((long)groupTotal, metric) : "—";
+            string timerStr    = $"  ({session.FormattedDuration})";
 
-        using var fontMain = Font(FtMain, false);
-        using var fontBig  = Font(FtTimer, true);
-        using var fontSub2 = Font(FtMain, false);
-        float labelW  = fontMain.MeasureText(metricLabel + " ");
-        float valW2   = fontBig.MeasureText(bigVal);
-        float timerW  = fontSub2.MeasureText(timerStr);
-        float totalLineW = labelW + valW2 + timerW;
-        float startX  = cx - totalLineW * 0.5f;
+            using var fontMain = Font(FtMain, false);
+            using var fontBig  = Font(FtTimer, true);
+            using var fontSub2 = Font(FtMain, false);
+            float labelW     = fontMain.MeasureText(metricLabel + " ");
+            float valW2      = fontBig.MeasureText(bigVal);
+            float timerW     = fontSub2.MeasureText(timerStr);
+            float totalLineW = labelW + valW2 + timerW;
+            float startX     = cx - totalLineW * 0.5f;
 
-        Draw(canvas, metricLabel + " ",  startX + labelW * 0.5f,                    midY + 6f, FtMain,  false, TextMuted, Align.Center);
-        Draw(canvas, bigVal,             startX + labelW + valW2 * 0.5f,            midY + 6f, FtTimer, true,  TextTimer, Align.Center);
-        Draw(canvas, timerStr,           startX + labelW + valW2 + timerW * 0.5f,   midY + 6f, FtMain,  false, TextMuted, Align.Center);
+            Draw(canvas, metricLabel + " ", startX + labelW * 0.5f,                   midY + 6f, FtMain,  false, TextMuted, Align.Center);
+            Draw(canvas, bigVal,            startX + labelW + valW2 * 0.5f,           midY + 6f, FtTimer, true,  TextTimer, Align.Center);
+            Draw(canvas, timerStr,          startX + labelW + valW2 + timerW * 0.5f,  midY + 6f, FtMain,  false, TextMuted, Align.Center);
+        }
+        else
+        {
+            // Just show the timer centered
+            Draw(canvas, session.FormattedDuration, cx, midY + 6f, FtTimer, true, TextTimer, Align.Center);
+        }
     }
 
     // ── Group header row ──────────────────────────────────────────────────────
@@ -480,9 +517,10 @@ public sealed class MeterCanvas : IDisposable
         Draw(canvas, group.Label,                     LeftPad + 14f,             midY, FtMain, true,  TextPrim,  Align.Left);
         Draw(canvas, $"  ({group.Combatants.Count})", LeftPad + 14f + labelW2,   midY, FtSub,  false, TextMuted, Align.Left);
 
-        // Top value
+        // Top value — respects scrollbar margin
+        float effW = w - opts.ScrollbarW;
         if (topVal > 0)
-            Draw(canvas, FormatVal((long)topVal, metric), w - RightPad, midY, FtSub, false, TextMuted, Align.Right);
+            Draw(canvas, FormatVal((long)topVal, metric), effW - RightPad, midY, FtSub, false, TextMuted, Align.Right);
     }
 
     // ── Combatant row (card style) ────────────────────────────────────────────
@@ -494,10 +532,11 @@ public sealed class MeterCanvas : IDisposable
         bool    isLocal  = localEntityId != 0 && c.EntityId == localEntityId;
         SKColor barColor = EnsureBright(AbgrToSkColor(opts.BarColorAbgr));
 
-        // ── Card bounds ───────────────────────────────────────────────────────
+        // ── Card bounds — right edge reserves scrollbar space ─────────────────
+        float effW  = w - opts.ScrollbarW;
         float cardX = CardMargin;
         float cardY = y + CardMargin;
-        float cardW = w - CardMargin * 2;
+        float cardW = effW - CardMargin * 2;
         // CardH is const 60f
 
         var cardRect = SKRect.Create(cardX, cardY, cardW, CardH);
@@ -743,17 +782,18 @@ public sealed class MeterCanvas : IDisposable
         const float PadR    =  6f;  // right padding
 
         float midY = y + rowH * 0.5f;
+        float effW = w - opts.ScrollbarW; // content width excluding scrollbar track
 
-        // Row background — alternating
+        // Row background — alternating (full width)
         _p.Color = rowIdx % 2 == 0
             ? new SKColor(0x1C, 0x16, 0x18, 0xFF)
             : new SKColor(0x18, 0x12, 0x14, 0xFF);
         canvas.DrawRect(SKRect.Create(0, y, w, rowH), _p);
 
-        // Bar as background fill (proportional width, behind text)
+        // Bar as background fill (proportional width, within effW)
         if (pct > 0.001)
         {
-            float barFillW = w * (float)pct;
+            float barFillW = effW * (float)pct;
             _p.Color = barColor.WithAlpha(0x55);
             canvas.DrawRect(SKRect.Create(0, y, barFillW, rowH), _p);
         }
@@ -791,7 +831,7 @@ public sealed class MeterCanvas : IDisposable
         }
 
         // Right side: value + pct (measure first so name can truncate)
-        float rightX = w - PadR;
+        float rightX = effW - PadR;
         if (opts.ShowPercentage && pct > 0.001)
         {
             string pctStr = $"{pct * 100.0:F0}%";
