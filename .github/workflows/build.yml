@@ -52,9 +52,9 @@ jobs:
         run: |
           $out = "pack"
           New-Item -ItemType Directory $out | Out-Null
-          Copy-Item src/bin/Release/DamageMeter.dll $out/
-          Copy-Item src/bin/Release/SkiaSharp.dll   $out/ -ErrorAction SilentlyContinue
-          Copy-Item src/bin/Release/libSkiaSharp.dll $out/ -ErrorAction SilentlyContinue
+          Copy-Item src/bin/x64/Release/DamageMeter.dll $out/
+          Copy-Item src/bin/x64/Release/SkiaSharp.dll   $out/ -ErrorAction SilentlyContinue
+          Copy-Item src/bin/x64/Release/libSkiaSharp.dll $out/ -ErrorAction SilentlyContinue
           Copy-Item DamageMeter.json $out/
           Compress-Archive -Path $out/* -DestinationPath DamageMeter.zip
 
