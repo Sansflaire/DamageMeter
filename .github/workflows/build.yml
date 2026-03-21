@@ -74,7 +74,7 @@ jobs:
           $pm  = @(Get-Content pluginmaster.json | ConvertFrom-Json)
           $pm[0].AssemblyVersion = "$ver.0"
           $pm[0].LastUpdated     = $ts
-          $pm | ConvertTo-Json -Depth 5 | Set-Content pluginmaster.json
+          ConvertTo-Json -Depth 5 -InputObject $pm | Set-Content pluginmaster.json
 
           git config user.name  "Sansflaire"
           git config user.email "sansflaire@users.noreply.github.com"
