@@ -26,10 +26,17 @@ public sealed class RenderSurface : IDisposable
     public bool ReadPixels(byte[] destination)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // Flush before reading — no-op for CPU raster surfaces but required for any
+        // future GPU-backed surface and makes intent explicit.
+        _surface.Canvas.Flush();
+
         var handle = GCHandle.Alloc(destination, GCHandleType.Pinned);
         try
         {
-            var info = new SKImageInfo(Width, Height, SKColorType.Rgba8888, SKAlphaType.Premul);
+            // Unpremul converts premul→straight on readback so ImGui's SrcAlpha blend doesn't
+            // multiply alpha a second time (black halos on blurs/glows). Surface stays Premul.
+            var info = new SKImageInfo(Width, Height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
             return _surface.ReadPixels(info, handle.AddrOfPinnedObject(), Width * 4, 0, 0);
         }
         finally { handle.Free(); }

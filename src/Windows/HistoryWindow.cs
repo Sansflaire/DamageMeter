@@ -104,12 +104,20 @@ public sealed class HistoryWindow : IDisposable
         // Draw newest first
         for (int i = sessions.Count - 1; i >= 0; i--)
         {
-            var s       = sessions[i];
+            var s        = sessions[i];
             var selected = _selectedIndex == idx;
-            var label   = $"{s.ZoneName}  [{s.FormattedDuration}]  {s.StartTime.ToLocalTime():HH:mm}##sess_{idx}";
+            var label    = s.IsSummary
+                ? $"Σ {s.ZoneName}  [{s.FormattedDuration}]  {s.PullCount} pulls  {s.StartTime.ToLocalTime():HH:mm}##sess_{idx}"
+                : $"{s.ZoneName}  [{s.FormattedDuration}]  {s.StartTime.ToLocalTime():HH:mm}##sess_{idx}";
+
+            if (s.IsSummary)
+                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.85f, 0.3f, 1f));
 
             if (ImGui.Selectable(label, selected))
                 _selectedIndex = idx;
+
+            if (s.IsSummary)
+                ImGui.PopStyleColor();
 
             if (ImGui.IsItemHovered())
             {
@@ -123,20 +131,17 @@ public sealed class HistoryWindow : IDisposable
 
             if (selected)
             {
-                ImGui.SameLine();
+                ImGui.Indent(8f);
 
-                // View button
                 if (ImGui.SmallButton($"View##v_{idx}"))
                 {
                     PinnedSession = s;
                     _plugin._mainWindow.IsVisible = true;
                 }
 
-                ImGui.SameLine();
-
-                // Save / Unsave
                 if (!isSaved)
                 {
+                    ImGui.SameLine();
                     if (ImGui.SmallButton($"Save##save_{idx}"))
                     {
                         Tracker.SaveSession(s);
@@ -145,19 +150,20 @@ public sealed class HistoryWindow : IDisposable
                 }
 
                 ImGui.SameLine();
-
-                // Delete
-                ImGui.PushStyleColor(ImGuiCol.Button,       new Vector4(0.6f, 0.1f, 0.1f, 1f));
+                ImGui.PushStyleColor(ImGuiCol.Button,        new Vector4(0.6f, 0.1f, 0.1f, 1f));
                 ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.8f, 0.2f, 0.2f, 1f));
-                if (ImGui.SmallButton($"Delete##del_{idx}"))
+                bool deleted = ImGui.SmallButton($"Delete##del_{idx}");
+                ImGui.PopStyleColor(2);
+
+                ImGui.Unindent(8f);
+
+                if (deleted)
                 {
                     if (PinnedSession == s) PinnedSession = null;
                     Tracker.DeleteSession(s);
                     _selectedIndex = -1;
-                    ImGui.PopStyleColor(2);
                     break; // list modified — exit loop
                 }
-                ImGui.PopStyleColor(2);
             }
 
             idx++;

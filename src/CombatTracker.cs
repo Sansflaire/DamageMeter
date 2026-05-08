@@ -80,6 +80,10 @@ public sealed class CombatTracker : IDisposable
     private readonly Configuration _config;
     private readonly string        _storePath;
 
+    // Instance summary tracking: record time when we enter a new zone so we can
+    // collect all sessions recorded there and merge them on zone exit.
+    private DateTime _instanceEnterTime = DateTime.UtcNow;
+
     // Action name cache: looked up from Lumina on first encounter
     private readonly Dictionary<uint, string> _actionNames = new();
 
@@ -122,7 +126,8 @@ public sealed class CombatTracker : IDisposable
             _hook.Enable();
         }
 
-        _framework.Update += OnFrameworkUpdate;
+        _framework.Update          += OnFrameworkUpdate;
+        _clientState.TerritoryChanged += OnTerritoryChanged;
         _log.Info("DamageMeter: CombatTracker initialized.");
     }
 
@@ -133,6 +138,104 @@ public sealed class CombatTracker : IDisposable
         if (inCombat && !_wasInCombat) StartSession();
         if (!inCombat && _wasInCombat) EndSession();
         _wasInCombat = inCombat;
+    }
+
+    // ── Territory change → instance summary ───────────────────────────────────
+    private void OnTerritoryChanged(uint newTerritoryId)
+    {
+        try   { TryCreateInstanceSummary(); }
+        catch (Exception ex) { _log.Error($"DamageMeter: Instance summary error — {ex.Message}"); }
+        _instanceEnterTime = DateTime.UtcNow;
+    }
+
+    private void TryCreateInstanceSummary()
+    {
+        var pulls = Store.TempSessions
+            .Where(s => !s.IsSummary && s.StartTime >= _instanceEnterTime)
+            .ToList();
+
+        if (pulls.Count < 2) return;
+
+        var summary = BuildInstanceSummary(pulls);
+        Store.TempSessions.Add(summary);
+        PruneTempSessions();
+        SaveStore();
+        _log.Info($"DamageMeter: Instance summary — {summary.Id} ({pulls.Count} pulls)");
+    }
+
+    private static CombatSession BuildInstanceSummary(List<CombatSession> pulls)
+    {
+        var zoneName  = pulls[0].ZoneName;
+        var startTime = pulls[0].StartTime;
+        var endTime   = pulls.Max(s => s.EndTime ?? s.StartTime);
+
+        var summary = new CombatSession
+        {
+            Id        = CombatSession.MakeId(zoneName, startTime) + "_summary",
+            ZoneName  = zoneName,
+            StartTime = startTime,
+            EndTime   = endTime,
+            IsSummary = true,
+            PullCount = pulls.Count,
+        };
+
+        foreach (var pull in pulls)
+        {
+            var offset = (long)(pull.StartTime - startTime).TotalMilliseconds;
+            foreach (var (entityId, src) in pull.Combatants)
+            {
+                if (!summary.Combatants.TryGetValue(entityId, out var dst))
+                {
+                    dst = new CombatantData
+                    {
+                        EntityId   = src.EntityId,
+                        Name       = src.Name,
+                        World      = src.World,
+                        ClassJobId = src.ClassJobId,
+                        Type       = src.Type,
+                    };
+                    summary.Combatants[entityId] = dst;
+                }
+
+                dst.TotalDamageDealt          += src.TotalDamageDealt;
+                dst.TotalHealingDone          += src.TotalHealingDone;
+                dst.TotalOverhealingDone      += src.TotalOverhealingDone;
+                dst.TotalDamageTaken          += src.TotalDamageTaken;
+                dst.TotalAvoidableDamageTaken += src.TotalAvoidableDamageTaken;
+
+                MergeAbilities(dst.DamageByAbility,      src.DamageByAbility);
+                MergeAbilities(dst.HealingByAbility,     src.HealingByAbility);
+                MergeAbilities(dst.DamageTakenByAbility, src.DamageTakenByAbility);
+
+                foreach (var ev in src.DamageEvents)
+                    dst.DamageEvents.Add((ev.TickMs + offset, ev.Amount));
+                foreach (var ev in src.HealingEvents)
+                    dst.HealingEvents.Add((ev.TickMs + offset, ev.Amount));
+            }
+        }
+
+        return summary;
+    }
+
+    private static void MergeAbilities(
+        Dictionary<uint, AbilityStats> dst,
+        Dictionary<uint, AbilityStats> src)
+    {
+        foreach (var (id, s) in src)
+        {
+            if (!dst.TryGetValue(id, out var d))
+            {
+                d = new AbilityStats { ActionId = id, Name = s.Name };
+                dst[id] = d;
+            }
+            d.TotalAmount   += s.TotalAmount;
+            d.TotalOverheal += s.TotalOverheal;
+            d.Hits          += s.Hits;
+            d.MinHit = (d.MinHit == 0) ? s.MinHit
+                     : (s.MinHit  == 0) ? d.MinHit
+                     : Math.Min(d.MinHit, s.MinHit);
+            d.MaxHit = Math.Max(d.MaxHit, s.MaxHit);
+        }
     }
 
     // ── Session lifecycle ─────────────────────────────────────────────────────
@@ -236,28 +339,51 @@ public sealed class CombatTracker : IDisposable
 
                 if (value <= 0) continue;
 
+                var casterName = casterData?.Name ?? $"#{casterEntityId}";
+                var targetName = targetData?.Name ?? $"#{targetId}";
+                var casterType = casterData?.Type.ToString() ?? "null";
+                var targetType = targetData?.Type.ToString() ?? "null";
+                _log.Debug($"[DM] kind={( byte)kind}(0x{(byte)kind:X2}) " +
+                           $"action={actionId}({actionName}) val={value} " +
+                           $"caster={casterName}[{casterType}] target={targetName}[{targetType}]" +
+                           (targetId == casterEntityId ? " SELF" : ""));
+
                 switch (kind)
                 {
                     case EffectKind.Damage:
                     case EffectKind.BlockedDamage:
                     case EffectKind.ParriedDamage:
                     case EffectKind.OtherDamage:
-                        if (casterData != null)
+                    {
+                        bool killingBlow = IsKillingBlow(targetId, value);
+                        bool isSelfHit   = targetId == casterEntityId;
+
+                        // Damage dealt: record for any hit that isn't a self-hit.
+                        // Self-heals like Recuperate arrive as EffectKind.Damage with
+                        // casterEntityId == targetId — that's the only case we exclude.
+                        if (casterData != null && !isSelfHit)
                         {
                             casterData.TotalDamageDealt += value;
                             casterData.DamageEvents.Add((tickMs, value));
-                            RecordAbility(casterData.DamageByAbility, actionId, actionName, value);
+                            RecordAbility(casterData.DamageByAbility, actionId, actionName, value, skipMin: killingBlow);
                         }
-                        if (targetData != null)
+                        // Damage taken: record unless the caster is a party member of the target
+                        // (party members can't damage each other in any content we care about).
+                        // Unknown caster (null) = environment damage — always record.
+                        if (targetData != null && !isSelfHit && casterData?.Type != CombatantType.PartyMember)
                         {
                             targetData.TotalDamageTaken += value;
                             if (isAoe) targetData.TotalAvoidableDamageTaken += value;
                             RecordAbility(targetData.DamageTakenByAbility, actionId, actionName, value);
                         }
                         break;
+                    }
 
                     case EffectKind.Heal:
-                        if (casterData != null)
+                    {
+                        // Only record heals that target a friendly entity — filters out abilities
+                        // like Feint/True North that produce spurious Heal effects on enemies.
+                        if (casterData != null && targetData?.Type != CombatantType.Enemy)
                         {
                             var overheal   = ComputeOverheal(targetId, value);
                             var actualHeal = value - overheal;
@@ -267,6 +393,7 @@ public sealed class CombatTracker : IDisposable
                             RecordAbility(casterData.HealingByAbility, actionId, actionName, actualHeal, overheal);
                         }
                         break;
+                    }
                 }
             }
         }
@@ -275,14 +402,26 @@ public sealed class CombatTracker : IDisposable
     // ── Ability stats helpers ─────────────────────────────────────────────────
     private static void RecordAbility(
         Dictionary<uint, AbilityStats> dict,
-        uint actionId, string name, long amount, long overheal = 0)
+        uint actionId, string name, long amount, long overheal = 0, bool skipMin = false)
     {
         if (!dict.TryGetValue(actionId, out var stats))
         {
             stats = new AbilityStats { ActionId = actionId, Name = name };
             dict[actionId] = stats;
         }
-        stats.Record(amount, overheal);
+        stats.Record(amount, overheal, skipMin);
+    }
+
+    /// <summary>
+    /// Returns true if this hit would kill the target (pre-hit HP &lt;= hit value).
+    /// Must be called BEFORE Original fires — CurrentHp is still the pre-hit value.
+    /// </summary>
+    private bool IsKillingBlow(uint targetId, long value)
+    {
+        var obj = _objectTable.FirstOrDefault(o => o.EntityId == targetId);
+        if (obj is IBattleChara chara && chara.CurrentHp > 0)
+            return (long)chara.CurrentHp <= value;
+        return false;
     }
 
     private string GetActionName(uint actionId)
@@ -452,7 +591,8 @@ public sealed class CombatTracker : IDisposable
     // ── Dispose ───────────────────────────────────────────────────────────────
     public void Dispose()
     {
-        _framework.Update -= OnFrameworkUpdate;
+        _framework.Update             -= OnFrameworkUpdate;
+        _clientState.TerritoryChanged -= OnTerritoryChanged;
         if (ActiveSession != null) EndSession();
         _hook?.Dispose();
         _log.Info("DamageMeter: CombatTracker disposed.");

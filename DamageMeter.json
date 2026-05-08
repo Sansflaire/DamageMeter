@@ -1,16 +1,17 @@
 {
-    "Author": "Sansflaire",
-    "Name": "Damage Meter",
-    "InternalName": "DamageMeter",
-    "Punchline": "Real-time combat damage/healing meter for FFXIV.",
-    "Description": "Tracks damage dealt, healing done, DPS, HPS, overhealing, damage taken, and more in real time for you and your party. Stores up to 20 recent combat sessions automatically, with manual save slots for encounters you want to keep. Fully configurable display, bar colors, and window styles.",
-    "ApplicableVersion": "any",
-    "DalamudApiLevel": 14,
-    "Tags": [
-        "combat",
-        "utility",
-        "meter",
-        "dps",
-        "parsing"
-    ]
+  "Author": "Sansflaire",
+  "Name": "Damage Meter",
+  "InternalName": "DamageMeter",
+  "Punchline": "Real-time combat damage/healing meter for FFXIV.",
+  "Description": "Tracks damage dealt, healing done, DPS, HPS, overhealing, damage taken, and more in real time for you and your party. Stores up to 20 recent combat sessions automatically, with manual save slots for encounters you want to keep. Fully configurable display, bar colors, and window styles.",
+  "ApplicableVersion": "any",
+  "DalamudApiLevel": 15,
+  "Tags": [
+    "combat",
+    "utility",
+    "meter",
+    "dps",
+    "parsing"
+  ],
+  "AssemblyVersion": "0.2.4"
 }

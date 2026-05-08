@@ -63,12 +63,15 @@ public class AbilityStats
             ? (double)TotalOverheal / (TotalAmount + TotalOverheal) * 100
             : 0;
 
-    public void Record(long amount, long overheal = 0)
+    public void Record(long amount, long overheal = 0, bool skipMin = false)
     {
-        TotalAmount  += amount;
+        TotalAmount   += amount;
         TotalOverheal += overheal;
         Hits++;
-        MinHit = Hits == 1 ? amount : Math.Min(MinHit, amount);
+        // skipMin = true for killing blows where the recorded value is capped at target's
+        // remaining HP rather than the true hit power; MinHit stays 0 until a surviving hit.
+        if (!skipMin)
+            MinHit = MinHit == 0 ? amount : Math.Min(MinHit, amount);
         MaxHit = Math.Max(MaxHit, amount);
     }
 }
@@ -149,6 +152,8 @@ public class CombatSession
     public DateTime  StartTime { get; set; } = DateTime.UtcNow;
     public DateTime? EndTime   { get; set; }
     public bool      IsSaved   { get; set; }
+    public bool      IsSummary { get; set; }
+    public int       PullCount { get; set; } // > 0 means this is an aggregated instance summary
 
     public Dictionary<uint, CombatantData> Combatants { get; set; } = new();
 

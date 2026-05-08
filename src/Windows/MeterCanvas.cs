@@ -883,10 +883,11 @@ public sealed class MeterCanvas : IDisposable
         for (int pass = 1; pass <= 3; pass++)
         {
             float blurR = pass * 5f;
+            using var filter     = SKImageFilter.CreateBlur(blurR, blurR);
             using var bloomPaint = new SKPaint
             {
                 Color       = glowColor.WithAlpha((byte)(intensity * 60f / pass)),
-                ImageFilter = SKImageFilter.CreateBlur(blurR, blurR),
+                ImageFilter = filter,
                 BlendMode   = SKBlendMode.Screen,
                 IsAntialias = true,
                 Style       = SKPaintStyle.Fill,

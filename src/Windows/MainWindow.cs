@@ -14,7 +14,7 @@ namespace DamageMeter.Windows;
 /// </summary>
 public sealed class MainWindow : IDisposable
 {
-    private bool _isVisible = true;
+    private bool _isVisible = false;
     public bool IsVisible { get => _isVisible; set => _isVisible = value; }
 
     private readonly Plugin _plugin;
@@ -443,7 +443,7 @@ public sealed class MainWindow : IDisposable
             ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted(a.Hits.ToString());
             ImGui.TableSetColumnIndex(2); ImGui.TextUnformatted(FormatNumber(a.TotalAmount));
             ImGui.TableSetColumnIndex(3); ImGui.TextUnformatted(FormatNumber((long)a.Average));
-            ImGui.TableSetColumnIndex(4); ImGui.TextUnformatted(a.Hits > 0 ? FormatNumber(a.MinHit) : "-");
+            ImGui.TableSetColumnIndex(4); ImGui.TextUnformatted(a.MinHit > 0 ? FormatNumber(a.MinHit) : "-");
             ImGui.TableSetColumnIndex(5); ImGui.TextUnformatted(FormatNumber(a.MaxHit));
 
             if (showOverheal)
