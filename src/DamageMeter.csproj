@@ -1,6 +1,6 @@
-<Project Sdk="Dalamud.NET.Sdk/14.0.2">
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.2.4</Version>
+    <Version>0.2.5</Version>
     <AssemblyName>DamageMeter</AssemblyName>
     <RootNamespace>DamageMeter</RootNamespace>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -13,7 +13,7 @@
     <Punchline>Real-time combat damage/healing meter for FFXIV.</Punchline>
     <Description>Tracks damage dealt, healing done, DPS, HPS, overhealing, damage taken, and more in real time for you and your party. Stores up to 20 recent combat sessions automatically, with manual save slots for encounters you want to keep. Fully configurable display, bar colors, and window styles.</Description>
     <ApplicableVersion>any</ApplicableVersion>
-    <DalamudApiLevel>14</DalamudApiLevel>
+    <DalamudApiLevel>15</DalamudApiLevel>
     <Tags>combat;utility;meter;dps;parsing</Tags>
     <RepoUrl>https://github.com/Sansflaire/DamageMeter</RepoUrl>
   </PropertyGroup>
