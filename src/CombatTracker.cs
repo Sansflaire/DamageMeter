@@ -28,32 +28,51 @@ public sealed class CombatTracker : IDisposable
 {
     // ── ActionEffect hook ─────────────────────────────────────────────────────
     //
-    // Raw ActionEffect entry — 8 bytes per effect, layout:
-    //   [0] Type   (EffectKind below)
-    //   [1] Param0
-    //   [2] Param1
-    //   [3] Param2
-    //   [4] Param3 — high byte for extended values (damage > 65 535)
-    //   [5] Param4
-    //   [6] Flags  — bit 0x40 = extend value via Param3
-    //   [7] Flags2
-    // Value ushort = bytes [6..7]; extended = value | (Param3 << 16) when Flags & 0x40.
-    // TODO: re-verify layout against FFXIVClientStructs after major game patches.
+    // Raw ActionEffect entry — 8 bytes per effect.
+    // Ground-truthed against FFXIVClientStructs.FFXIV.Client.Game.Character.ActionEffectHandler.Effect,
+    // ravahn/FFXIV_ACT_Plugin DamageEffectEntry/HealEffectEntry, and perchbirdd/DamageInfoPlugin
+    // (all three agree on byte layout):
+    //   [0] Type   = EffectKind below
+    //   [1] Param0 = bit 0x20 = Critical (Damage), bit 0x40 = DirectHit (Damage)
+    //   [2] Param1 = low nibble = AttackType, high nibble = ElementType (Damage)
+    //                bit 0x20 = Critical (Heal — yes, Heal's crit bit is at a different byte)
+    //   [3] Param2 = combo amount / positional bonus
+    //   [4] Param3 = high word multiplier for extended values (added when Param4 & 0x40)
+    //   [5] Param4 = bit 0x40 = "extend value with Param3 << 16", bit 0x80 = SourceEntry
+    //   [6] Value low byte ┐
+    //   [7] Value high byte┘  ushort at offset 6
+    //
+    // Extended damage formula: damage = Value + ((Param4 & 0x40) != 0 ? Param3 * 65536 : 0).
 
     private const int EffectSize       = 8;
     private const int EffectsPerTarget = 8;
 
+    // EffectKind byte values are authoritative from FFXIVClientStructs / Ravahn / perchbirdd.
+    // The previous values for BlockedDamage/ParriedDamage/Invulnerable/Heal were off by 1+,
+    // and "OtherDamage = 11" was actually MpGain — see RESEARCH.md §1.5.
     private enum EffectKind : byte
     {
-        Nothing       = 0,
-        Miss          = 1,
-        FullResist    = 2,
-        Damage        = 3,
-        BlockedDamage = 4,
-        ParriedDamage = 5,
-        Invulnerable  = 6,
-        OtherDamage   = 11,
-        Heal          = 14,
+        Nothing                 = 0,
+        Miss                    = 1,
+        FullResist              = 2,
+        Damage                  = 3,
+        Heal                    = 4,    // was 14 (which is actually GpGain)
+        BlockedDamage           = 5,    // was 4 (which is actually Heal)
+        ParriedDamage           = 6,    // was 5
+        Invulnerable            = 7,    // was 6
+        NoEffectText            = 8,
+        MpLoss                  = 10,
+        MpGain                  = 11,   // previously misnamed "OtherDamage" and counted as damage
+        TpLoss                  = 12,
+        TpGain                  = 13,
+        GpGain                  = 14,   // was previously labeled "Heal" here
+        ApplyStatusEffectTarget = 15,
+        ApplyStatusEffectSource = 16,
+        StatusNoEffect          = 20,
+        Knockback               = 33,
+        Mount                   = 40,
+        VFX                     = 59,
+        JobGauge                = 61,
     }
 
     private unsafe delegate void ReceiveActionEffectDelegate(
@@ -330,22 +349,29 @@ public sealed class CombatTracker : IDisposable
             {
                 var effPtr = targetEffBase + e * EffectSize;
                 var kind   = (EffectKind)effPtr[0];
-                var param3 = effPtr[4];
-                var flags  = effPtr[6];
-                var value  = (long)*(ushort*)(effPtr + 6);
+                var param0 = effPtr[1];                       // crit (0x20), DH (0x40) for Damage
+                var param3 = effPtr[4];                       // high word multiplier
+                var param4 = effPtr[5];                       // flags: 0x40 = extend, 0x80 = source entry
+                var value  = (long)*(ushort*)(effPtr + 6);    // ushort Value
 
-                if ((flags & 0x40) != 0)
+                // The previous build read the flag byte from effPtr[6], which is the LOW BYTE
+                // of Value — that caused spurious extension by Param3*65536 on roughly half
+                // of all medium-magnitude hits. The flag actually lives in Param4 at offset 5.
+                if ((param4 & 0x40) != 0)
                     value += (long)param3 << 16;
 
                 if (value <= 0) continue;
 
+                bool isCritical  = (param0 & 0x20) != 0;
+                bool isDirectHit = (param0 & 0x40) != 0;
                 var casterName = casterData?.Name ?? $"#{casterEntityId}";
                 var targetName = targetData?.Name ?? $"#{targetId}";
                 var casterType = casterData?.Type.ToString() ?? "null";
                 var targetType = targetData?.Type.ToString() ?? "null";
-                _log.Debug($"[DM] kind={( byte)kind}(0x{(byte)kind:X2}) " +
-                           $"action={actionId}({actionName}) val={value} " +
-                           $"caster={casterName}[{casterType}] target={targetName}[{targetType}]" +
+                _log.Debug($"[DM] kind={(byte)kind}(0x{(byte)kind:X2} {kind}) " +
+                           $"action={actionId}({actionName}) val={value}" +
+                           (isCritical ? " CRIT" : "") + (isDirectHit ? " DH" : "") +
+                           $" caster={casterName}[{casterType}] target={targetName}[{targetType}]" +
                            (targetId == casterEntityId ? " SELF" : ""));
 
                 switch (kind)
@@ -353,7 +379,6 @@ public sealed class CombatTracker : IDisposable
                     case EffectKind.Damage:
                     case EffectKind.BlockedDamage:
                     case EffectKind.ParriedDamage:
-                    case EffectKind.OtherDamage:
                     {
                         bool killingBlow = IsKillingBlow(targetId, value);
                         bool isSelfHit   = targetId == casterEntityId;

@@ -109,123 +109,114 @@ var effPtr = targetEffBase + e * EffectSize;                           // + e * 
 
 ### 1.4 The 8-Byte Effect Entry — Full Layout
 
-Each effect entry is exactly 8 bytes:
+Each effect entry is exactly 8 bytes. **Ground-truthed against three independent sources** (FFXIVClientStructs 7.51.0.8301 `ActionEffectHandler.Effect`, ravahn/FFXIV_ACT_Plugin 3.0.2.1 `EffectEntry`/`DamageEffectEntry`, perchbirdd/DamageInfoPlugin `EffectEntry` — all agree):
 
 ```
-Byte [0]  = EffectType (see §1.5 EffectKind table)
-Byte [1]  = Param0     (varies by effect type)
-Byte [2]  = Param1     (varies by effect type)
-Byte [3]  = Param2     (varies by effect type)
-Byte [4]  = Param3     = high byte for extended value when Flags[0x40] is set
-Byte [5]  = Param4     (varies by effect type)
-Byte [6]  = Flags      = low byte of the value ushort; bit 0x40 = extended value flag
-Byte [7]  = Flags2     = high byte of the value ushort
+Byte [0]  = Type   (EffectKind below — the effect kind code)
+Byte [1]  = Param0 (Damage: bit 0x20 = Critical, bit 0x40 = Direct Hit)
+Byte [2]  = Param1 (Damage: low nibble = AttackType, high nibble = ElementType)
+                   (Heal:   bit 0x20 = Critical — yes, heal crit lives at a different byte)
+Byte [3]  = Param2 (combo amount / positional bonus)
+Byte [4]  = Param3 (high word multiplier for extended values — adds Param3*65536)
+Byte [5]  = Param4 (bit 0x40 = "extend Value with Param3<<16", bit 0x80 = SourceEntry)
+Byte [6]  = Value  low byte  ┐ ushort Value at offset 6
+Byte [7]  = Value  high byte ┘
 ```
 
-**Value extraction:**
+**Value extraction (correct formula):**
 ```csharp
-var flags  = effPtr[6];
-var value  = (long)*(ushort*)(effPtr + 6);  // bytes 6+7 as little-endian ushort
+var param3 = effPtr[4];                       // high word multiplier
+var param4 = effPtr[5];                       // flags
+var value  = (long)*(ushort*)(effPtr + 6);    // ushort Value at bytes 6-7
 
-if ((flags & 0x40) != 0)
-    value += (long)effPtr[4] << 16;  // Param3 becomes the high 8 bits above the ushort
+if ((param4 & 0x40) != 0)
+    value += (long)param3 << 16;              // damage > 65535 uses Param3 as high word
 ```
 
-This allows values up to: `65535 + (255 << 16)` = `16,776,960` — enough for all FFXIV damage/heal values.
+Max representable value: `65535 + (255 << 16)` = `16,776,960` — covers all in-game damage/heal numbers.
 
-**NOTE — Byte [6] dual use:** Byte 6 is simultaneously:
-- The low byte of the `value` ushort (bytes 6–7)
-- The `Flags` byte checked for the 0x40 extension bit
+**⚠ HISTORICAL BUG (pre-2026-06-09):** Earlier builds of this file documented Byte [6] as the "Flags" byte and read the extension flag from it. **That was wrong.** Byte 6 is the low byte of Value. The extension flag is in Byte [5] (Param4). The previous "byte 6 dual use" note was a misunderstanding — when the low byte of Value happened to have bit 0x40 set (~50% of hits between 64 and 32768), the broken check triggered a spurious `Param3 * 65536` extension, multiplying many hits by ~65,536. Fixed in 0.2.6.
 
-The bit 0x40 in the flags byte does NOT corrupt the value because the flag bit position (0x40 = 64) is within the low byte of the ushort. When reading the ushort from bytes 6–7, the full 16-bit value including the flag bit is used as the low part. The high part comes from Param3 when extended.
+**Crit / Direct-Hit flags (for `EffectKind.Damage`):**
+```csharp
+bool isCritical  = (param0 & 0x20) != 0;
+bool isDirectHit = (param0 & 0x40) != 0;
+```
 
-**Param0–Param4 semantics by EffectKind:**
-- For Damage: Param0 often encodes the damage type (Physical/Magical/Darkness/etc.)
-- For Heal: Param0 may encode whether it's a regen tick vs a direct heal
-- For StatusApply: Param0-2 encode the status effect ID and duration
-- These are largely undocumented and community-researched
+**Crit flag for `EffectKind.Heal`** lives at a different byte — `(Param1 & 0x20) != 0`. Verified from Ravahn's `HealEffectEntry.IsCritical` getter, and confirmed by perchbirdd treating Heal entries with `dmgType = DamageType.None` (so no DamageType decoding from Param1).
+
+**SourceEntry bit (Param4 & 0x80):** when set, the effect's true target is the action's *source*, not the `targetEntityIds[t]` slot. Used for "heal-yourself-as-a-side-effect" actions (e.g. Bloodbath, Equilibrium). DamageMeter does not yet remap on this bit — heals attributed to the wrong actor when this fires are an outstanding refinement (see §9.6).
+
+**Param0–Param4 semantics by EffectKind:** the table above is the verified core. Beyond that, Param0/Param1/Param2 carry effect-specific data — status effect IDs for status-apply entries, damage subtypes for damage entries, etc. Ravahn's `ParseEffectEntry` strategies are the authoritative cross-reference.
 
 ---
 
-### 1.5 `EffectKind` — Complete Known Table
+### 1.5 `EffectKind` — Authoritative Table
 
-**CRITICAL SECTION.** This is the most important table in this document. Every byte value observed in `/xllog [DM]` output must be explained here.
+**CRITICAL SECTION.** Cross-validated against three independent sources: `FFXIVClientStructs.FFXIV.Client.Game.Character.ActionEffectHandler.Effect.Type`, `FFXIV_ACT_Plugin.Parse.EffectEntryType`, and `DamageInfoPlugin.ActionEffectType`. The pre-0.2.6 enum was almost entirely wrong — see §1.5b below.
 
-Our current enum (partial — many values missing):
-```csharp
-Nothing       = 0,
-Miss          = 1,
-FullResist    = 2,
-Damage        = 3,
-BlockedDamage = 4,
-ParriedDamage = 5,
-Invulnerable  = 6,
-OtherDamage   = 11,
-Heal          = 14,
-```
+**Authoritative byte values (`/xllog [DM]` will show byte in hex; match here):**
 
-**Complete known table (community-researched, verify against FFXIVClientStructs):**
+| Byte | Hex | Name | What it is |
+|---:|---:|---|---|
+| 0 | 0x00 | Nothing | Unused effect slot — pad in the 8-effect array |
+| 1 | 0x01 | Miss | Attack missed |
+| 2 | 0x02 | FullResist | Damage fully resisted / immune |
+| **3** | **0x03** | **Damage** | **Standard ability damage hit. Count for DPS.** |
+| **4** | **0x04** | **Heal** | **Standard heal. Count for HPS.** |
+| **5** | **0x05** | **BlockedDamage** | **Damage after block — reduced amount got through. Count for DPS.** |
+| **6** | **0x06** | **ParriedDamage** | **Damage after parry — reduced amount got through. Count for DPS.** |
+| 7 | 0x07 | Invulnerable | Target invulnerable (Hallowed Ground, Living Dead). Zero damage applied. |
+| 8 | 0x08 | NoEffectText | Effect with no visible number (interrupt prevention, etc.) |
+| 9 | 0x09 | Unknown_0 | Reserved/unknown (perchbirdd) |
+| 10 | 0x0A | MpLoss | MP drained from target |
+| 11 | 0x0B | MpGain | MP restored. **Pre-0.2.6 misnamed this "OtherDamage" and counted it as damage** — that's the Lucid Dreaming inflated-DPS bug. |
+| 12 | 0x0C | TpLoss | TP drained |
+| 13 | 0x0D | TpGain | TP gained |
+| 14 | 0x0E | GpGain | Gathering-points gained. **Pre-0.2.6 misnamed this "Heal"** — usually harmless because gathering doesn't fire in combat. |
+| 15 | 0x0F | ApplyStatusEffectTarget | Status effect applied to target. Value = duration. |
+| 16 | 0x10 | ApplyStatusEffectSource | Status effect applied to source (self-buff side effect of an action). |
+| 20 | 0x14 | StatusNoEffect | Status couldn't be applied (immune, already had) |
+| 27 | 0x1B | Unknown_0 | Reserved (perchbirdd) |
+| 28 | 0x1C | Unknown_1 | Reserved (perchbirdd) |
+| 33 | 0x21 | Knockback | Knockback effect |
+| 40 | 0x28 | Mount | Mount action |
+| 59 | 0x3B | VFX | Visual effect only |
+| 61 | 0x3D | JobGauge | Job gauge update |
 
-| Byte | Name | Description |
-|------|------|-------------|
-| 0 | Nothing | No effect, slot is unused |
-| 1 | Miss | Attack missed target |
-| 2 | FullResist | Damage fully resisted (e.g., immune) |
-| 3 | Damage | Standard damage (physical or magical) |
-| 4 | BlockedDamage | Damage was blocked (reduced, absorbed by block) |
-| 5 | ParriedDamage | Damage was parried (reduced) |
-| 6 | Invulnerable | Target was invulnerable (Hallowed Ground, Living Dead, etc.) |
-| 7 | NoEffectText | Effect with no displayed number (absorb shields, etc.) |
-| 8 | FailMounted | Action failed because target is mounted |
-| 9 | ? | Unknown |
-| 10 | ? | Unknown |
-| 11 | OtherDamage | DoT ticks, environmental damage, conditional damage |
-| 12 | ? | Unknown |
-| 13 | ? | Unknown |
-| 14 | Heal | Direct heal (standard healing abilities) |
-| 15 | BlockedHeal | Heal partially absorbed/blocked |
-| 16 | ? | Unknown |
-| 17 | ? | Unknown |
-| 18 | ? | Unknown |
-| 19 | ? | Unknown |
-| 20 | ? | Unknown |
-| 21 | HpRestore? | Possibly HP recovery type distinct from Heal (self-heals?) |
-| 22 | HpRestore? | Possibly HP recovery via some abilities (Recuperate?) |
-| 23 | ? | Unknown |
-| 24 | ? | Unknown |
-| 25 | ? | Unknown |
-| 26 | ? | Unknown |
-| 27 | ? | Unknown |
-| 28 | ? | Unknown |
-| 29 | ? | Unknown |
-| 30 | StatusApply | Apply a status effect to target — value = status duration, Param0/1 = status ID |
-| 31 | ? | Unknown |
-| 32 | ? | Unknown |
-| 33 | StatusApply? | Variant of status application |
-| 34 | ? | Unknown |
-| 35 | ? | Unknown |
-| 36 | StatusRemove | Remove a status effect from target |
-| 37 | ? | Unknown |
-| 38 | ? | Unknown |
-| 39 | ? | Unknown |
-| 40 | ? | Unknown |
-| 41 | ? | Unknown |
-| 42 | ? | Unknown |
-| 43 | ? | Unknown |
-| 44 | ? | Unknown |
-| 45 | ? | Unknown |
-| 46 | ? | Unknown |
-| 47 | ? | Unknown |
-| 48 | ? | Unknown |
-| 49 | ? | Unknown |
-| 50 | ? | Unknown |
+**Bytes 17–19, 21–26, 29–32, 34–39, 41–58, 60, 62+** are either reserved or specialized/rare. If `/xllog [DM]` shows one, look it up in `FFXIV_ACT_Plugin.Parse.EffectEntryType` first — it has the widest known-byte coverage.
 
-**⚠ IMPORTANT — TO BE FILLED FROM `/xllog`:**
-When Recuperate, True North, Feint, or other abilities show unexpected kind values in the debug log, look them up and fill this table. The `[DM] kind=X` log line is the primary source of truth.
+**Damage tracking switch (what to count in TotalDamageDealt):**
+- Bytes 3, 5, 6 = damage that landed in some form (full / blocked-partial / parried-partial)
+- Byte 7 (Invulnerable) = explicitly *no* damage — exclude
+- Byte 11 (MpGain) = mana, not damage — exclude (was wrongly included pre-0.2.6)
 
-**Known issues:**
-- Recuperate (PvP self-heal) appears as some EffectKind other than 14. The exact value must be determined from game logs.
-- Non-damaging abilities (Feint, True North) produce EffectKind 14 Heal effects on non-self targets — this is a game quirk, not a parsing error. The value is the HP regen/mitigation amount in some cases.
+**Heal tracking (what to count in TotalHealingDone):**
+- Byte 4 only. (Was wrongly looking at byte 14 = GpGain pre-0.2.6 → real heals were going to BlockedDamage by mistake.)
+
+### 1.5b The 0.2.6 enum-value correction
+
+Pre-0.2.6 had hand-rolled enum values that were guesses, and they were off:
+
+| Symbol used in code | Pre-0.2.6 byte | Actual byte | What that pre-0.2.6 byte really is |
+|---|---:|---:|---|
+| `Damage` | 3 | 3 | Damage ✓ (only one that was right) |
+| `BlockedDamage` | 4 | 5 | byte 4 was actually `Heal` |
+| `ParriedDamage` | 5 | 6 | byte 5 was actually `BlockedDamage` |
+| `Invulnerable` | 6 | 7 | byte 6 was actually `ParriedDamage` |
+| `OtherDamage` | 11 | (removed) | byte 11 was actually `MpGain` |
+| `Heal` | 14 | 4 | byte 14 was actually `GpGain` |
+
+Real-world consequences this caused (which is what made the meter "totally inaccurate"):
+- **Healers showed huge fake DPS.** Real heal effects (byte 4) hit the `BlockedDamage` case and were summed into `TotalDamageDealt`.
+- **`TotalHealingDone` was almost never populated.** The code waited for byte 14, which only fires during gathering nodes.
+- **Lucid Dreaming / Refresh / in-combat MP regen inflated DPS.** Byte 11 = MpGain entered the `OtherDamage` case.
+- **All medium-magnitude hits had a ~50% chance of being multiplied by 65,536.** The flag byte was read from byte 6 (low byte of Value); whenever Value's low byte coincidentally had bit 6 set, the false-positive extension fired.
+
+### 1.5c Updates for §9 (previously-open issues)
+
+- **§9.1 Recuperate** — Recuperate is a PvP self-heal. With the correct `Heal = 4` mapping it should now route through the heal branch with `targetId == casterEntityId`. The existing self-hit filter in the damage branch (which prevented self-damage from counting) was the workaround for the pre-0.2.6 byte/enum mess; with byte/enum fixed, Recuperate's real bytes never enter the damage branch.
+- **§9.2 Feint/True North in HealingDone** — these abilities don't produce real heal-typed effects. They produce `ApplyStatusEffectTarget` (byte 15) or status-related effects. The pre-0.2.6 misclassification was the cause: byte 14 (GpGain) firing for some unrelated reason was being counted as heal. With byte 14 no longer mapped to Heal, this should disappear.
 
 ---
 
@@ -1312,23 +1303,17 @@ When the player changes zone (`TerritoryChanged` fires), DamageMeter checks if 2
 
 These are gaps in our understanding that need to be resolved through game observation (via `/xllog [DM]` debug output).
 
-### 9.1 Recuperate EffectKind
+### 9.1 Recuperate EffectKind — RESOLVED (0.2.6)
 
-**Problem:** Recuperate (PvP self-heal) appears in Damage Dealt, suggesting it fires with EffectKind.Damage (3) rather than EffectKind.Heal (14).
+**Was:** Recuperate (PvP self-heal) appeared in Damage Dealt, suggesting it fired with the wrong EffectKind.
 
-**Hypothesis:** Recuperate may use a different EffectKind byte (e.g., 22 = HpRestore, or some other value) that we're not handling. Alternatively, it fires as EffectKind.Damage with `casterEntityId == targetId`.
+**Resolution:** This was a side effect of the §1.5b enum-value bug. Byte 4 is Heal, not BlockedDamage; with the correct mapping, Recuperate's heal effect routes through the heal branch. The self-hit filter (`targetId == casterEntityId`) was the pre-0.2.6 workaround and remains in place for any other self-targeted damage edge case, but is no longer load-bearing for Recuperate.
 
-**How to resolve:** Use Recuperate in a duel or training dummy while `/xllog` debug is open. Note the `kind=X` value in the `[DM]` log line. Update the EffectKind table (§1.5) with the actual value.
+### 9.2 Feint / True North in Healing Done — RESOLVED (0.2.6)
 
-**Current workaround:** Self-hit filter (`targetId == casterEntityId`) prevents Recuperate from appearing in DamageDealt regardless of EffectKind.
+**Was:** Feint and True North were appearing in HealingDone with small values.
 
-### 9.2 Feint / True North in Healing Done
-
-**Problem:** Feint and True North appear in HealingDone. These are melee utility skills — Feint reduces enemy damage output, True North ignores positional requirements.
-
-**Hypothesis:** These abilities fire a EffectKind.Heal (14) effect with a small value on the target (possibly HP restore from the mitigation calculation, or a game quirk where the mitigation is encoded as a "heal" on the caster).
-
-**How to resolve:** Use Feint on an enemy while `/xllog` debug is open. Check what kind/target is being logged.
+**Resolution:** Pre-0.2.6 was reading `Heal = 14`, but byte 14 is actually `GpGain` (gathering points). Some unrelated effect occasionally produced byte 14 during combat and was being counted as a heal. With `Heal = 4` now correct, byte 14 is no longer in the Heal switch — these phantom heals stop appearing. If Feint or True North still show up in HealingDone after the fix, capture the `[DM] kind=X` log line and file a new sub-bug.
 
 ### 9.3 PvP Enemy Classification
 
@@ -1338,14 +1323,9 @@ These are gaps in our understanding that need to be resolved through game observ
 
 **Future improvement:** Use `IClientState.IsPvP` to switch classification mode — when true, non-party `IPlayerCharacter` objects = enemies. This would allow correct `CombatantType` assignment in PvP.
 
-### 9.4 Full EffectKind Table
+### 9.4 Full EffectKind Table — RESOLVED (0.2.6)
 
-Bytes 7–13, 15–29, 31–50+ are undocumented. The debug `[DM]` log now logs ALL non-zero effects with kind byte in hex. Priority: observe in game and fill §1.5.
-
-**Known resources for research:**
-- FFXIVClientStructs issues and ActionEffect struct
-- IINACT source (open-source ACT plugin for FFXIV)
-- cactbot (JS-based FFXIV parser with ActionEffect handling)
+§1.5 is now ground-truthed from FFXIVClientStructs + Ravahn + perchbirdd. The bytes that matter for damage/heal/MP tracking are covered. Bytes beyond 16 are mostly status-effect bookkeeping, knockback, mounts, VFX — none affect damage accuracy. If a new byte appears in `[DM]` logs, look it up in `FFXIV_ACT_Plugin.Parse.EffectEntryType` (in `devPlugins/DamageMeter/FFXIV_ACT_Plugin/decompiled/parse/`).
 
 ### 9.5 History Window — View/Save/Delete Buttons Unresponsive
 
@@ -1353,7 +1333,34 @@ Bytes 7–13, 15–29, 31–50+ are undocumented. The debug `[DM]` log now logs 
 
 **Status:** NOT YET INVESTIGATED. Likely an ImGui hit-test / cursor restore issue similar to the toolbar placement bug. Need to read HistoryWindow.cs button layout code.
 
-### 9.6 Instance Summary Not Yet Implemented
+### 9.6 SourceEntry Bit (Param4 & 0x80) — Not Yet Honored
+
+**Problem:** When an effect has bit 0x80 set in `Param4` (byte 5), the effect's true target is the *source* of the action, not `targetEntityIds[t]`. This is how the game encodes "this action also heals/buffs me as a side effect" — e.g. Bloodbath, Equilibrium, some PvP abilities.
+
+**Current behavior:** DamageMeter records the heal/damage against the wrong actor when this bit is set. Usually a small minority of total events.
+
+**Fix sketch:** In the hook loop, after reading `param4`, check `(param4 & 0x80) != 0`. If set, swap `targetData` ↔ `casterData` for that one effect entry only. Refer to `ParseStrategyActionEffect.ReportActionEffect` in the decompiled parser for the canonical pattern (it does this remapping via `IsSourceEntry`).
+
+### 9.7 DoT / HoT Ticks Are NOT Tracked
+
+**Problem:** Damage-over-time ticks (Bio III, Dia, Caustic Bite, Stormbite, Higanbana, etc.) and heal-over-time ticks (Regen, Aspected Benefic, Asylum) do NOT come through `ActionEffectHandler.Receive`. The game computes them server-side on a 3-second status-tick cadence and dispatches them through a separate `EffectResult` / status-tick packet handler. So DamageMeter currently misses all DoT/HoT damage.
+
+**Impact:** Bards, DRGs in heavy bleeds, BLM Thunder uptime, SMN Bio uptime, AST sect heals, SCH Bio, WHM Dia — all will under-report.
+
+**Fix path (architectural):**
+- Option A: Add a Dalamud `FlyTextGui.FlyTextCreated` event subscription. Filter for DoT/HoT kinds. Pro: no extra hook. Con: requires deduping against ActionEffect (some DoTs also appear as direct hits).
+- Option B: Hook a second native function. The likely candidate is `BattleChara.OnEffectResult` or `StatusManager.ProcessEffectResult` in FFXIVClientStructs. Need to find the right signature. Pro: cleanest. Con: more setup, version-fragile.
+- Option C: Subscribe to `BattleChara.StatusManager` changes and run a manual tick simulator (mirrors what FFXIV_ACT_Plugin's `DoTSimulator` does). Pro: works offline. Con: re-implements the game's potency formula.
+
+**Recommended:** Start with Option A — it's the smallest code change and covers ~95% of cases. Cross-validate against `FFXIV_ACT_Plugin.Parse.DoTSimulator` (in `devPlugins/DamageMeter/FFXIV_ACT_Plugin/decompiled/parse/DoTSimulator.cs`) when implementing.
+
+### 9.8 Crit / Direct-Hit Statistics Not Surfaced
+
+**Problem:** Crit% and Direct Hit% per ability are not tracked, despite the bits being readable from `Param0` (§1.4). The 0.2.6 fix added flag-reading to the debug log but did not extend `AbilityStats` to count them.
+
+**Fix sketch:** Add `int CritHits`, `int DirectHits` to `AbilityStats`. Increment in `RecordAbility` when the bits are set. Expose `CritRate` and `DhRate` as computed properties. Show in the HTTP API per-combatant detail. Trivial code change once the data flow is verified.
+
+### 9.9 Instance Summary Not Yet Implemented
 
 **Problem:** After leaving an instance (zone change), there's no auto-created aggregate session merging all pulls from that run.
 
@@ -1361,4 +1368,26 @@ Bytes 7–13, 15–29, 31–50+ are undocumented. The debug `[DM]` log now logs 
 
 ---
 
-*Last updated: 2026-04-01 — Full research pass: Dalamud API confirmed from source, SkiaSharp patterns filled, ImGui patterns filled from decompiled DLL. §9.5 and §9.6 added as open items.*
+## 10. Decompile References
+
+The DamageMeter directory now contains decompiled reference material for cross-validation. **Do not edit these files** — they are read-only references.
+
+| Path | What it is |
+|---|---|
+| [ACT/](ACT/) | ACT v3.8.5.288 EXE — the `IActPluginV1` host, not used by this plugin but reference for combat-data model concepts |
+| [FFXIV_ACT_Plugin/](FFXIV_ACT_Plugin/) | FFXIV_ACT_Plugin v3.0.2.1 main DLL + 2 Deucalion native injectors |
+| [FFXIV_ACT_Plugin/extracted/](FFXIV_ACT_Plugin/extracted/) | Costura-bundled sub-DLLs (Common, Parse, Logfile, Network, Memory, Config, Resource + Machina) |
+| [FFXIV_ACT_Plugin/decompiled/parse/](FFXIV_ACT_Plugin/decompiled/parse/) | **Gold-standard damage decoder.** `DamageEffectEntry.cs`, `HealEffectEntry.cs`, `EffectEntry.cs`, `ReportCombatData.cs`, `ParseStrategyActionEffect.cs` are the authoritative references for the byte layout and crit/DH/extended-value math. |
+| [FFXIV_ACT_Plugin/decompiled/logfile/](FFXIV_ACT_Plugin/decompiled/logfile/) | `LogMessageType` enum (line-type codes 0–43 / 249–254) |
+| [FFXIV_ACT_Plugin/decompiled/network/](FFXIV_ACT_Plugin/decompiled/network/) | Packet handlers — `Ability.cs` shows the wire format → log line mapping |
+| [FFXIVClientStructs_decompiled/](FFXIVClientStructs_decompiled/) | Dalamud's `ActionEffectHandler.Effect` ground truth — byte layout authority |
+| [ACT_REFERENCE.md](ACT_REFERENCE.md) | Full 985-line architectural reference for ACT and the FFXIV plugin family. Background reading. |
+
+External sources used:
+- [perchbirdd/DamageInfoPlugin](https://github.com/perchbirdd/DamageInfoPlugin) — third independent confirmation of the `ActionEffectType` enum and byte layout. See `DamageInfoEnums.cs` and `DamageInfoStructs.cs`.
+- [ravahn/FFXIV_ACT_Plugin wiki](https://github.com/ravahn/FFXIV_ACT_Plugin/wiki) — supplementary docs on `IDataSubscription` / `IDataRepository`.
+- [aers/FFXIVClientStructs](https://github.com/aers/FFXIVClientStructs) — repository for ground-truth struct layouts.
+
+---
+
+*Last updated: 2026-06-09 — 0.2.6 accuracy pass: byte-layout (§1.4), EffectKind enum (§1.5), and §9.1/§9.2/§9.4 re-grounded against FFXIVClientStructs + Ravahn parser + perchbirdd. §9.6/§9.7/§9.8 added for remaining accuracy work (SourceEntry remap, DoT tracking, crit stats).*

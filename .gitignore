@@ -21,6 +21,12 @@ pack/
 # Claude context files (never committed per project rules)
 CLAUDE.md
 
+# Local decompile references for accuracy research — not for the public repo
+ACT/
+FFXIV_ACT_Plugin/
+FFXIVClientStructs_decompiled/
+ACT_REFERENCE.md
+
 # IDE / OS
 .vs/
 .vscode/
