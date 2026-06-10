@@ -116,6 +116,40 @@ public sealed class CombatTracker : IDisposable
     private const uint DotPseudoActionId = 0xFFFF_FFFE;
     private const uint HotPseudoActionId = 0xFFFF_FFFD;
 
+    // ── Limit Break pseudo-combatant ──────────────────────────────────────────
+    // Limit Break actions (ActionCategory == 8 in Lumina) are attributed to a
+    // single shared "Limit Break" pseudo-combatant rather than the player who
+    // pressed the button — the user's call. EntityId sentinel chosen above all
+    // real game IDs to avoid collisions.
+    private const uint LimitBreakEntityId = 0xFFFF_FFFA;
+
+    // Action ID → IsLimitBreak cache; Lumina lookup is too expensive to do per hit.
+    private readonly Dictionary<uint, bool> _limitBreakCache = new();
+
+    // ── Pet/Owner sentinel ─────────────────────────────────────────────────────
+    // FFXIV uses 0xE0000000 as the "no owner" / "no target" sentinel. Any other
+    // non-zero OwnerId on a Character* points at the entity that owns the pet
+    // (Esteem → DRK player, Bahamut → SMN, Eos → SCH, etc.).
+    private const uint NoOwnerSentinel = 0xE0000000;
+
+    // ── FlyText/ActionEffect dedup buffer ─────────────────────────────────────
+    // FlyText fires for both direct ActionEffect hits AND for DoT ticks (which
+    // don't come through ActionEffectHandler.Receive). We can't tell the two
+    // apart from the FlyText kind alone — auto-attacks and DoT ticks share the
+    // same FlyTextKind.AutoAttackOrDot{*}.
+    //
+    // Strategy: every time ProcessEffects records a damage value, push that
+    // (value, time) into a short-lived buffer. When OnFlyTextCreated fires with
+    // a damage-style kind, try to find and consume a matching entry within the
+    // dedup window. Match → it's the ActionEffect's own flytext, ignore. No
+    // match → it must be a DoT tick (or a HoT, party-member damage, etc.).
+    //
+    // The buffer is intentionally a List<(long,long)> instead of Queue<T> because
+    // we need to remove arbitrary entries on match (not just FIFO).
+    private const long DedupWindowMs = 350;
+    private readonly List<(long Value, long TickMs)> _recentDamageHits = new();
+    private readonly List<(long Value, long TickMs)> _recentHealHits   = new();
+
     public CombatSession? ActiveSession { get; private set; }
     public SessionStore   Store         { get; private set; } = new();
 
@@ -345,8 +379,37 @@ public sealed class CombatTracker : IDisposable
         var actionId   = header->ActionId;
         var isAoe      = numTargets >= 3;
         var tickMs     = (long)(DateTime.UtcNow - ActiveSession.StartTime).TotalMilliseconds;
-        var casterData = GetOrCreateCombatant(ActiveSession, casterEntityId, casterPtr);
         var actionName = GetActionName(actionId);
+
+        // ── Attribution: Limit Break > Pet > original caster ─────────────────
+        // Limit Break actions are routed to a shared pseudo-combatant. Otherwise
+        // if the caster is a pet (OwnerId points to a real entity), credit the
+        // owner instead — fixes DRK Living Shadow, SMN Bahamut, SCH Eos, MCH
+        // Automaton Queen.
+        CombatantData? casterData;
+        bool isLimitBreak = IsLimitBreakAction(actionId);
+        if (isLimitBreak)
+        {
+            casterData = GetOrCreateLimitBreakCombatant(ActiveSession);
+        }
+        else
+        {
+            uint       effectiveCasterId  = casterEntityId;
+            Character* effectiveCasterPtr = casterPtr;
+            if (casterPtr != null)
+            {
+                var ownerId = casterPtr->OwnerId;
+                if (ownerId != 0 && ownerId != NoOwnerSentinel)
+                {
+                    effectiveCasterId = ownerId;
+                    var ownerObj = _objectTable.FirstOrDefault(o => o.EntityId == ownerId);
+                    effectiveCasterPtr = ownerObj != null
+                        ? (Character*)ownerObj.Address
+                        : null;
+                }
+            }
+            casterData = GetOrCreateCombatant(ActiveSession, effectiveCasterId, effectiveCasterPtr);
+        }
 
         var effectsBase = (byte*)effects;
 
@@ -396,6 +459,11 @@ public sealed class CombatTracker : IDisposable
                         bool killingBlow = IsKillingBlow(targetId, value);
                         bool isSelfHit   = targetId == casterEntityId;
 
+                        // Push this value into the FlyText dedup buffer regardless
+                        // of whether we credit the caster — a matching FlyText event
+                        // is going to fire and we want to skip it cleanly.
+                        RecordRecentHit(_recentDamageHits, value, tickMs);
+
                         // Damage dealt: record for any hit that isn't a self-hit.
                         // Self-heals like Recuperate arrive as EffectKind.Damage with
                         // casterEntityId == targetId — that's the only case we exclude.
@@ -419,6 +487,10 @@ public sealed class CombatTracker : IDisposable
 
                     case EffectKind.Heal:
                     {
+                        // Push the heal into the FlyText dedup buffer regardless
+                        // of attribution, so the matching FlyText is skipped.
+                        RecordRecentHit(_recentHealHits, value, tickMs);
+
                         // Only record heals that target a friendly entity — filters out abilities
                         // like Feint/True North that produce spurious Heal effects on enemies.
                         if (casterData != null && targetData?.Type != CombatantType.Enemy)
@@ -667,13 +739,20 @@ public sealed class CombatTracker : IDisposable
                              || kind == FlyTextKind.HealingCrit;
 
             if (!isDamageTick && !isHealTick) return;
-
-            // icon == 0 means the flytext is a direct hit / auto-attack / direct
-            // heal — these all come through ActionEffectHandler.Receive already.
-            // icon != 0 means a status effect is the source (i.e. DoT/HoT tick).
-            if (icon == 0) return;
-
             if (val1 <= 0) return;
+
+            var tickMs = (long)(DateTime.UtcNow - ActiveSession.StartTime).TotalMilliseconds;
+
+            // Value-based dedup against the ring buffer ProcessEffects fills as
+            // it records hits. A FlyText that matches a recent ActionEffect IS
+            // that ActionEffect's flytext — skip it. No match = a tick the hook
+            // didn't see, i.e. a DoT/HoT.
+            //
+            // The 0.2.6 icon != 0 filter was wrong: DoT ticks fire with icon==0
+            // (FFXIV doesn't paint a status icon next to the floating number),
+            // so the filter swallowed every Dia / Bio / Higanbana tick.
+            var dedupBuf = isHealTick ? _recentHealHits : _recentDamageHits;
+            if (TryConsumeRecentHit(dedupBuf, val1, tickMs)) return;
 
             var local = _objectTable.LocalPlayer;
             var localId = local?.EntityId ?? 0;
@@ -685,7 +764,6 @@ public sealed class CombatTracker : IDisposable
                 var caster = GetOrCreateCombatant(ActiveSession, localId, localPtr);
                 if (caster == null) return;
 
-                var tickMs = (long)(DateTime.UtcNow - ActiveSession.StartTime).TotalMilliseconds;
                 long value = val1;
 
                 if (isDamageTick)
@@ -699,7 +777,7 @@ public sealed class CombatTracker : IDisposable
                 {
                     // FlyText doesn't tell us overheal, so log full as actual heal.
                     // The HoT target is unknown from the event; we can't compute
-                    // overheal without it. Accept the inflation; refinement in §9.7b.
+                    // overheal without it. Accept the inflation; refinement later.
                     caster.TotalHealingDone += value;
                     caster.HealingEvents.Add((tickMs, value));
                     RecordAbility(caster.HealingByAbility, HotPseudoActionId,
@@ -711,6 +789,67 @@ public sealed class CombatTracker : IDisposable
         {
             _log.Error($"DamageMeter: FlyText hook error — {ex.Message}");
         }
+    }
+
+    // ── Limit Break detection ─────────────────────────────────────────────────
+    // Looks up the action's ActionCategory in Lumina. Category 8 = Limit Break.
+    // Cached because Lumina row reads are expensive and we hit this per effect.
+    private bool IsLimitBreakAction(uint actionId)
+    {
+        if (_limitBreakCache.TryGetValue(actionId, out var cached)) return cached;
+        bool result = false;
+        try
+        {
+            var sheet = _dataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>();
+            var row   = sheet?.GetRow(actionId);
+            result = row?.ActionCategory.RowId == 8;
+        }
+        catch { /* unknown action id — leave false */ }
+        _limitBreakCache[actionId] = result;
+        return result;
+    }
+
+    private CombatantData GetOrCreateLimitBreakCombatant(CombatSession session)
+    {
+        if (session.Combatants.TryGetValue(LimitBreakEntityId, out var existing))
+            return existing;
+        var data = new CombatantData
+        {
+            EntityId   = LimitBreakEntityId,
+            Name       = "Limit Break",
+            World      = "",
+            ClassJobId = 0,
+            Type       = CombatantType.PartyMember, // grouped with party so it shows in the main bar
+        };
+        session.Combatants[LimitBreakEntityId] = data;
+        return data;
+    }
+
+    // ── FlyText/ActionEffect dedup helpers ────────────────────────────────────
+    private static void RecordRecentHit(List<(long Value, long TickMs)> buf, long value, long tickMs)
+    {
+        TrimExpired(buf, tickMs);
+        buf.Add((value, tickMs));
+    }
+
+    private static bool TryConsumeRecentHit(List<(long Value, long TickMs)> buf, long value, long tickMs)
+    {
+        TrimExpired(buf, tickMs);
+        for (int i = 0; i < buf.Count; i++)
+        {
+            if (buf[i].Value == value)
+            {
+                buf.RemoveAt(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void TrimExpired(List<(long Value, long TickMs)> buf, long nowMs)
+    {
+        while (buf.Count > 0 && nowMs - buf[0].TickMs > DedupWindowMs)
+            buf.RemoveAt(0);
     }
 
     // ── Dispose ───────────────────────────────────────────────────────────────

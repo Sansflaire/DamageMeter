@@ -625,23 +625,27 @@ public sealed class MainWindow : IDisposable
 
         var sorted = abilities.Values.OrderByDescending(a => a.TotalAmount).ToList();
 
+        // SizingStretchProp + Resizable lets the user drag column borders. We seed
+        // each numeric column with InitWidthOrWeight so the initial layout matches
+        // what shipped pre-resize, but everything except Ability still claims a
+        // proportional slice so columns shrink/grow with window width.
         var tableFlags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg
-                       | ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit
-                       | ImGuiTableFlags.Sortable;
+                       | ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingStretchProp
+                       | ImGuiTableFlags.Resizable | ImGuiTableFlags.Sortable;
 
         int colCount = showOverheal ? 8 : 7;
         if (!ImGui.BeginTable("##AbilityTable", colCount, tableFlags,
             new Vector2(0, 380f))) return;
 
         ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableSetupColumn("Ability",     ImGuiTableColumnFlags.WidthStretch);
-        ImGui.TableSetupColumn("Hits",        ImGuiTableColumnFlags.WidthFixed, 40);
-        ImGui.TableSetupColumn("Total",       ImGuiTableColumnFlags.WidthFixed, 80);
-        ImGui.TableSetupColumn(perSecLabel,   ImGuiTableColumnFlags.WidthFixed, 70);
-        ImGui.TableSetupColumn("Avg",         ImGuiTableColumnFlags.WidthFixed, 70);
-        ImGui.TableSetupColumn("Min",         ImGuiTableColumnFlags.WidthFixed, 60);
-        ImGui.TableSetupColumn("Max",         ImGuiTableColumnFlags.WidthFixed, 70);
-        if (showOverheal) ImGui.TableSetupColumn("Overheal", ImGuiTableColumnFlags.WidthFixed, 80);
+        ImGui.TableSetupColumn("Ability",     ImGuiTableColumnFlags.WidthStretch, 3.0f);
+        ImGui.TableSetupColumn("Hits",        ImGuiTableColumnFlags.WidthStretch, 0.6f);
+        ImGui.TableSetupColumn("Total",       ImGuiTableColumnFlags.WidthStretch, 1.0f);
+        ImGui.TableSetupColumn(perSecLabel,   ImGuiTableColumnFlags.WidthStretch, 0.9f);
+        ImGui.TableSetupColumn("Avg",         ImGuiTableColumnFlags.WidthStretch, 0.9f);
+        ImGui.TableSetupColumn("Min",         ImGuiTableColumnFlags.WidthStretch, 0.8f);
+        ImGui.TableSetupColumn("Max",         ImGuiTableColumnFlags.WidthStretch, 0.9f);
+        if (showOverheal) ImGui.TableSetupColumn("Overheal", ImGuiTableColumnFlags.WidthStretch, 1.1f);
         ImGui.TableHeadersRow();
 
         foreach (var a in sorted)
