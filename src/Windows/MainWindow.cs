@@ -90,9 +90,12 @@ public sealed class MainWindow : IDisposable
 
         if (!open) { ImGui.End(); return; }
 
-        DrawCanvasHeader();  // renders SkiaSharp canvas + draws header slice
-        DrawToolbar();       // toolbar always sits right below the header
-        DrawCanvasBody();    // body slice + scrollbar + hit-test buttons
+        DrawCanvasHeader();   // renders SkiaSharp canvas + draws header slice
+        DrawToolbar();        // toolbar always sits right below the header
+        if (Config.CurrentView == ViewMode.Graph)
+            DrawGraphBody();  // line-graph alternative to the bar body
+        else
+            DrawCanvasBody(); // body slice + scrollbar + hit-test buttons
         DrawDetailPopup();
 
         ImGui.End();
@@ -120,15 +123,23 @@ public sealed class MainWindow : IDisposable
         ImGui.PushStyleColor(ImGuiCol.ButtonActive,    0xFF3A3A70);
 
         // Fixed button widths so layout is predictable regardless of window size
+        const float BtnView     = 44f;   // "Chart" / "Graph" — each
         const float BtnHistory  = 62f;
         const float BtnSettings = 68f;
         const float BtnSpacing  =  4f;
         const float RightMargin =  8f;
 
         float avail  = ImGui.GetContentRegionAvail().X;
-        float comboW = avail - BtnHistory - BtnSettings - BtnSpacing * 2f - RightMargin;
+        float comboW = avail - BtnView * 2 - BtnHistory - BtnSettings - BtnSpacing * 4f - RightMargin;
 
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 4f);
+
+        // Chart / Graph view toggle — push a highlighted color when active.
+        DrawViewToggleButton("Chart##tb", ViewMode.Chart, BtnView);
+        ImGui.SameLine(0, BtnSpacing);
+        DrawViewToggleButton("Graph##tb", ViewMode.Graph, BtnView);
+
+        ImGui.SameLine(0, BtnSpacing);
         ImGui.SetNextItemWidth(Math.Max(40f, comboW));
         if (ImGui.BeginCombo("##MeterType", Config.CurrentMeter.DisplayName()))
         {
@@ -157,6 +168,22 @@ public sealed class MainWindow : IDisposable
         ImGui.PopStyleVar(2);
 
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 2f);
+    }
+
+    private void DrawViewToggleButton(string label, ViewMode mode, float width)
+    {
+        bool active = Config.CurrentView == mode;
+        if (active)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button,        0xFF3A3A70);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0xFF4A4A80);
+        }
+        if (ImGui.Button(label, new Vector2(width, 0)))
+        {
+            Config.CurrentView = mode;
+            _plugin.SaveConfig();
+        }
+        if (active) ImGui.PopStyleColor(2);
     }
 
     // ── Phase 1: render canvas + draw header slice ────────────────────────────
@@ -331,6 +358,197 @@ public sealed class MainWindow : IDisposable
         }
     }
 
+    // ── Graph view body ───────────────────────────────────────────────────────
+    // Time-series line chart. X-axis = elapsed seconds since session start, Y-axis
+    // = cumulative value of the active MeterType per combatant. One line per top-N
+    // combatant, color-coded. For per-second metrics (DPS / HPS / DTPS), the value
+    // shown is the rolling cumulative-divided-by-elapsed at each bin so the line
+    // converges to the player's average rate.
+    private static readonly uint[] GraphLineColors =
+    {
+        0xFF6464FFu, // red-orange
+        0xFFFFC864u, // sky-blue
+        0xFF64C864u, // green
+        0xFF64C8FFu, // amber
+        0xFFFF64C8u, // purple
+        0xFF64FFFFu, // yellow
+        0xFFFFFF64u, // cyan
+        0xFFC864FFu, // pink
+    };
+
+    private void DrawGraphBody()
+    {
+        _frameSession = GetDisplaySession();
+        var session   = _frameSession;
+        var bodyTL    = ImGui.GetCursorScreenPos();
+        var avail     = ImGui.GetContentRegionAvail();
+        // Leave room for the window border at the bottom.
+        var bodySize  = new Vector2(avail.X, Math.Max(80f, avail.Y));
+        var dl        = ImGui.GetWindowDrawList();
+
+        dl.AddRectFilled(bodyTL, bodyTL + bodySize, 0xFF14101A);
+
+        if (session == null || session.Combatants.Count == 0)
+        {
+            var msg = "No data to graph.";
+            var sz  = ImGui.CalcTextSize(msg);
+            dl.AddText(bodyTL + (bodySize - sz) * 0.5f, 0xFF808080, msg);
+            ImGui.Dummy(bodySize);
+            return;
+        }
+
+        var dur = session.DurationSeconds;
+        if (dur < 1.0)
+        {
+            var msg = "Fight too short to graph (need ≥ 1s).";
+            var sz  = ImGui.CalcTextSize(msg);
+            dl.AddText(bodyTL + (bodySize - sz) * 0.5f, 0xFF808080, msg);
+            ImGui.Dummy(bodySize);
+            return;
+        }
+
+        var metric = Config.CurrentMeter;
+
+        // Only metrics with per-event time data are graphable. Others can be
+        // added later by tracking DamageTakenEvents / OverhealEvents.
+        bool isDamageBased = metric == MeterType.DamageDealt || metric == MeterType.DPS;
+        bool isHealBased   = metric == MeterType.HealingDone || metric == MeterType.HPS;
+        if (!isDamageBased && !isHealBased)
+        {
+            var msg = $"Graph not supported for '{metric.DisplayName()}' yet.\nPick Damage Dealt / DPS / Healing Done / HPS.";
+            var sz  = ImGui.CalcTextSize(msg);
+            dl.AddText(bodyTL + (bodySize - sz) * 0.5f, 0xFFA0A0A0, msg);
+            ImGui.Dummy(bodySize);
+            return;
+        }
+        bool isRateMetric = metric == MeterType.DPS || metric == MeterType.HPS;
+
+        // Pick top-8 combatants by total of the selected metric.
+        var combatants = session.Combatants.Values
+            .Where(c => (isDamageBased ? c.TotalDamageDealt : c.TotalHealingDone) > 0)
+            .OrderByDescending(c => c.GetValue(metric, dur))
+            .Take(8)
+            .ToList();
+
+        if (combatants.Count == 0)
+        {
+            var msg = "No combatants with " + (isDamageBased ? "damage" : "healing") + " yet.";
+            var sz  = ImGui.CalcTextSize(msg);
+            dl.AddText(bodyTL + (bodySize - sz) * 0.5f, 0xFF808080, msg);
+            ImGui.Dummy(bodySize);
+            return;
+        }
+
+        // Plot region.
+        const float PadL = 50f, PadR = 12f, PadT = 28f, PadB = 22f;
+        var plotTL    = bodyTL + new Vector2(PadL, PadT);
+        var plotSize  = new Vector2(bodySize.X - PadL - PadR, bodySize.Y - PadT - PadB);
+        if (plotSize.X < 40 || plotSize.Y < 40)
+        {
+            ImGui.Dummy(bodySize);
+            return;
+        }
+
+        // Sample the plot at one bin per pixel (capped) so lines stay smooth at
+        // any window width without doing more work than there are pixels.
+        int nBins = Math.Clamp((int)plotSize.X, 32, 400);
+
+        // Build series; track global max for the Y scale.
+        var series = new List<(CombatantData c, double[] vals, uint color)>();
+        double maxV = 0;
+        for (int i = 0; i < combatants.Count; i++)
+        {
+            var c    = combatants[i];
+            var arr  = ComputeSeries(c, isDamageBased, isRateMetric, dur, nBins);
+            var hi   = 0.0;
+            for (int k = 0; k < arr.Length; k++) if (arr[k] > hi) hi = arr[k];
+            if (hi > maxV) maxV = hi;
+            series.Add((c, arr, GraphLineColors[i % GraphLineColors.Length]));
+        }
+        if (maxV <= 0) maxV = 1;
+
+        // Y-axis grid + labels.
+        const int yTicks = 4;
+        for (int i = 0; i <= yTicks; i++)
+        {
+            var frac = (float)i / yTicks;
+            var y    = plotTL.Y + plotSize.Y * (1f - frac);
+            var v    = (long)(maxV * frac);
+            uint gridColor = i == 0 ? 0xFF40304Cu : 0xFF2A2030u;
+            dl.AddLine(new Vector2(plotTL.X, y), new Vector2(plotTL.X + plotSize.X, y), gridColor);
+            var label = FormatNumber(v) + (isRateMetric ? "/s" : "");
+            var lsz   = ImGui.CalcTextSize(label);
+            dl.AddText(new Vector2(plotTL.X - 4 - lsz.X, y - lsz.Y * 0.5f), 0xFFA0A0A0, label);
+        }
+
+        // X-axis labels (5 ticks).
+        for (int i = 0; i <= 4; i++)
+        {
+            var x = plotTL.X + plotSize.X * i / 4;
+            var t = dur * i / 4;
+            int s = (int)t;
+            var label = $"{s / 60}:{s % 60:D2}";
+            var lsz   = ImGui.CalcTextSize(label);
+            dl.AddText(new Vector2(x - lsz.X * 0.5f, plotTL.Y + plotSize.Y + 4), 0xFFA0A0A0, label);
+        }
+
+        // Plot lines.
+        foreach (var (c, vals, color) in series)
+        {
+            var prev = new Vector2(plotTL.X, plotTL.Y + plotSize.Y);
+            for (int i = 0; i < nBins; i++)
+            {
+                var x = plotTL.X + plotSize.X * ((float)(i + 1) / nBins);
+                var y = plotTL.Y + plotSize.Y * (1f - (float)(vals[i] / maxV));
+                dl.AddLine(prev, new Vector2(x, y), color, 1.8f);
+                prev = new Vector2(x, y);
+            }
+        }
+
+        // Legend strip across the top of the plot.
+        var legX = bodyTL.X + PadL;
+        var legY = bodyTL.Y + 6;
+        const float swatch = 12f;
+        foreach (var (c, _, color) in series)
+        {
+            var name  = c.DisplayName(false, initialsOnly: true);
+            var label = $"{name}  {FormatNumber((long)c.GetValue(metric, dur))}";
+            var lsz   = ImGui.CalcTextSize(label);
+            if (legX + swatch + 4 + lsz.X + 12 > bodyTL.X + bodySize.X) break;
+            dl.AddRectFilled(new Vector2(legX, legY + 2),
+                             new Vector2(legX + swatch, legY + swatch + 2), color);
+            dl.AddText(new Vector2(legX + swatch + 4, legY), 0xFFFFFFFF, label);
+            legX += swatch + 4 + lsz.X + 12;
+        }
+
+        ImGui.Dummy(bodySize);
+    }
+
+    // Returns the cumulative value of the selected metric at nBins evenly-spaced
+    // time samples from 0..dur. For rate metrics (DPS / HPS), divides by elapsed.
+    // Events are appended in time order, so we use a single forward sweep.
+    private static double[] ComputeSeries(
+        CombatantData c, bool isDamageBased, bool isRateMetric, double dur, int nBins)
+    {
+        var events = isDamageBased ? c.DamageEvents : c.HealingEvents;
+        var result = new double[nBins];
+        long running = 0;
+        int  evIdx   = 0;
+        double durMs = dur * 1000.0;
+        for (int i = 0; i < nBins; i++)
+        {
+            var binMs = (i + 1) * durMs / nBins;
+            while (evIdx < events.Count && events[evIdx].TickMs <= binMs)
+            {
+                running += events[evIdx].Amount;
+                evIdx++;
+            }
+            double elapsedSec = (i + 1) * dur / nBins;
+            result[i] = isRateMetric && elapsedSec > 0 ? running / elapsedSec : running;
+        }
+        return result;
+    }
+
     // ── Detail popup (right-click) ────────────────────────────────────────────
     private void DrawDetailPopup()
     {
@@ -380,17 +598,17 @@ public sealed class MainWindow : IDisposable
         {
             if (ImGui.BeginTabItem($"Damage Dealt ({c.DamageByAbility.Count})"))
             {
-                DrawAbilityTable(c.DamageByAbility, c.TotalDamageDealt, showOverheal: false);
+                DrawAbilityTable(c.DamageByAbility, c.TotalDamageDealt, dur, "DPS", showOverheal: false);
                 ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem($"Healing Done ({c.HealingByAbility.Count})"))
             {
-                DrawAbilityTable(c.HealingByAbility, c.TotalHealingDone, showOverheal: true);
+                DrawAbilityTable(c.HealingByAbility, c.TotalHealingDone, dur, "HPS", showOverheal: true);
                 ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem($"Damage Taken ({c.DamageTakenByAbility.Count})"))
             {
-                DrawAbilityTable(c.DamageTakenByAbility, c.TotalDamageTaken, showOverheal: false);
+                DrawAbilityTable(c.DamageTakenByAbility, c.TotalDamageTaken, dur, "DTPS", showOverheal: false);
                 ImGui.EndTabItem();
             }
             ImGui.EndTabBar();
@@ -400,7 +618,8 @@ public sealed class MainWindow : IDisposable
     }
 
     private void DrawAbilityTable(
-        Dictionary<uint, AbilityStats> abilities, long grandTotal, bool showOverheal)
+        Dictionary<uint, AbilityStats> abilities, long grandTotal,
+        double durationSeconds, string perSecLabel, bool showOverheal)
     {
         if (abilities.Count == 0) { ImGui.TextDisabled("No data recorded."); return; }
 
@@ -410,23 +629,25 @@ public sealed class MainWindow : IDisposable
                        | ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit
                        | ImGuiTableFlags.Sortable;
 
-        int colCount = showOverheal ? 7 : 6;
+        int colCount = showOverheal ? 8 : 7;
         if (!ImGui.BeginTable("##AbilityTable", colCount, tableFlags,
             new Vector2(0, 380f))) return;
 
         ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableSetupColumn("Ability",  ImGuiTableColumnFlags.WidthStretch);
-        ImGui.TableSetupColumn("Hits",     ImGuiTableColumnFlags.WidthFixed, 40);
-        ImGui.TableSetupColumn("Total",    ImGuiTableColumnFlags.WidthFixed, 80);
-        ImGui.TableSetupColumn("Avg",      ImGuiTableColumnFlags.WidthFixed, 70);
-        ImGui.TableSetupColumn("Min",      ImGuiTableColumnFlags.WidthFixed, 60);
-        ImGui.TableSetupColumn("Max",      ImGuiTableColumnFlags.WidthFixed, 70);
+        ImGui.TableSetupColumn("Ability",     ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn("Hits",        ImGuiTableColumnFlags.WidthFixed, 40);
+        ImGui.TableSetupColumn("Total",       ImGuiTableColumnFlags.WidthFixed, 80);
+        ImGui.TableSetupColumn(perSecLabel,   ImGuiTableColumnFlags.WidthFixed, 70);
+        ImGui.TableSetupColumn("Avg",         ImGuiTableColumnFlags.WidthFixed, 70);
+        ImGui.TableSetupColumn("Min",         ImGuiTableColumnFlags.WidthFixed, 60);
+        ImGui.TableSetupColumn("Max",         ImGuiTableColumnFlags.WidthFixed, 70);
         if (showOverheal) ImGui.TableSetupColumn("Overheal", ImGuiTableColumnFlags.WidthFixed, 80);
         ImGui.TableHeadersRow();
 
         foreach (var a in sorted)
         {
             var pct = grandTotal > 0 ? (float)a.TotalAmount / grandTotal * 100f : 0f;
+            var perSec = durationSeconds > 0 ? a.TotalAmount / durationSeconds : 0;
 
             ImGui.TableNextRow();
             ImGui.TableSetColumnIndex(0);
@@ -442,13 +663,14 @@ public sealed class MainWindow : IDisposable
 
             ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted(a.Hits.ToString());
             ImGui.TableSetColumnIndex(2); ImGui.TextUnformatted(FormatNumber(a.TotalAmount));
-            ImGui.TableSetColumnIndex(3); ImGui.TextUnformatted(FormatNumber((long)a.Average));
-            ImGui.TableSetColumnIndex(4); ImGui.TextUnformatted(a.MinHit > 0 ? FormatNumber(a.MinHit) : "-");
-            ImGui.TableSetColumnIndex(5); ImGui.TextUnformatted(FormatNumber(a.MaxHit));
+            ImGui.TableSetColumnIndex(3); ImGui.TextUnformatted(durationSeconds > 0 ? FormatNumber((long)perSec) : "-");
+            ImGui.TableSetColumnIndex(4); ImGui.TextUnformatted(FormatNumber((long)a.Average));
+            ImGui.TableSetColumnIndex(5); ImGui.TextUnformatted(a.MinHit > 0 ? FormatNumber(a.MinHit) : "-");
+            ImGui.TableSetColumnIndex(6); ImGui.TextUnformatted(FormatNumber(a.MaxHit));
 
             if (showOverheal)
             {
-                ImGui.TableSetColumnIndex(6);
+                ImGui.TableSetColumnIndex(7);
                 if (a.TotalOverheal > 0)
                     ImGui.TextColored(new Vector4(1f, 0.7f, 0.2f, 1f),
                         $"{FormatNumber(a.TotalOverheal)} ({a.OverhealPercent:F0}%)");

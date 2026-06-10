@@ -10,6 +10,12 @@ public enum WindowStyle
     Modern    // Rounded corners, subtle gradient background
 }
 
+public enum ViewMode
+{
+    Chart,  // Existing bar meter
+    Graph,  // Line graph of selected metric over time, per combatant
+}
+
 [System.Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
@@ -17,6 +23,7 @@ public sealed class Configuration : IPluginConfiguration
 
     // ── Meter ────────────────────────────────────────────────────────────────
     public MeterType CurrentMeter { get; set; } = MeterType.DamageDealt;
+    public ViewMode  CurrentView  { get; set; } = ViewMode.Chart;
 
     // ── Display ──────────────────────────────────────────────────────────────
     /// Show the exact numeric value next to the bar.

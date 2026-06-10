@@ -7,6 +7,8 @@ using System.Numerics;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.ClientState.Objects.Types;
+using Dalamud.Game.Gui.FlyText;
+using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 
@@ -93,6 +95,7 @@ public sealed class CombatTracker : IDisposable
     private readonly IFramework   _framework;
     private readonly IDataManager _dataManager;
     private readonly IPartyList   _partyList;
+    private readonly IFlyTextGui  _flyTextGui;
 
     // ── State ─────────────────────────────────────────────────────────────────
     private bool          _wasInCombat;
@@ -105,6 +108,13 @@ public sealed class CombatTracker : IDisposable
 
     // Action name cache: looked up from Lumina on first encounter
     private readonly Dictionary<uint, string> _actionNames = new();
+
+    // ── DoT/HoT FlyText pseudo-ability IDs ────────────────────────────────────
+    // Real game action IDs are < 0x40000 (262144). We use sentinels above that to
+    // avoid colliding with any real action. Both buckets aggregate all tick damage
+    // from the FlyText hook into one entry per combatant.
+    private const uint DotPseudoActionId = 0xFFFF_FFFE;
+    private const uint HotPseudoActionId = 0xFFFF_FFFD;
 
     public CombatSession? ActiveSession { get; private set; }
     public SessionStore   Store         { get; private set; } = new();
@@ -122,6 +132,7 @@ public sealed class CombatTracker : IDisposable
         IFramework           framework,
         IDataManager         dataManager,
         IPartyList           partyList,
+        IFlyTextGui          flyTextGui,
         Configuration        config,
         string               configDir)
     {
@@ -132,6 +143,7 @@ public sealed class CombatTracker : IDisposable
         _framework   = framework;
         _dataManager = dataManager;
         _partyList   = partyList;
+        _flyTextGui  = flyTextGui;
         _config      = config;
         _storePath   = Path.Combine(configDir, "sessions.json");
 
@@ -145,8 +157,9 @@ public sealed class CombatTracker : IDisposable
             _hook.Enable();
         }
 
-        _framework.Update          += OnFrameworkUpdate;
+        _framework.Update             += OnFrameworkUpdate;
         _clientState.TerritoryChanged += OnTerritoryChanged;
+        _flyTextGui.FlyTextCreated    += OnFlyTextCreated;
         _log.Info("DamageMeter: CombatTracker initialized.");
     }
 
@@ -613,11 +626,99 @@ public sealed class CombatTracker : IDisposable
         }
     }
 
+    // ── FlyText DoT/HoT tick capture ──────────────────────────────────────────
+    //
+    // FFXIV doesn't deliver status-tick damage through ActionEffectHandler.Receive
+    // (the hook above). Instead, the game's status-effect tick processor fires the
+    // floating "DoT damage" number directly via the FlyText subsystem. Dalamud
+    // exposes that as IFlyTextGui.FlyTextCreated.
+    //
+    // FlyTextKind.AutoAttackOrDot{,Dh,Crit,CritDh} covers both auto-attacks AND
+    // DoT ticks. We disambiguate by the `icon` field: DoT ticks always carry the
+    // applied status effect's icon (non-zero), while auto-attacks pass `icon == 0`.
+    //
+    // FlyText events do NOT carry source / target entity IDs. So we can only
+    // credit the local player. Party-member DoT attribution is the §9.7 gap —
+    // tracked in RESEARCH.md for a future Ravahn-DoTSimulator port.
+    //
+    // Healing FlyText kinds (Healing, HealingCrit) cover both direct heals and
+    // HoT ticks — the icon trick works the same way.
+    private void OnFlyTextCreated(
+        ref FlyTextKind kind,
+        ref int val1,
+        ref int val2,
+        ref SeString text1,
+        ref SeString text2,
+        ref uint color,
+        ref uint icon,
+        ref uint damageTypeIcon,
+        ref float yOffset,
+        ref bool handled)
+    {
+        try
+        {
+            if (ActiveSession == null) return;
+
+            bool isDamageTick = kind == FlyTextKind.AutoAttackOrDot
+                             || kind == FlyTextKind.AutoAttackOrDotDh
+                             || kind == FlyTextKind.AutoAttackOrDotCrit
+                             || kind == FlyTextKind.AutoAttackOrDotCritDh;
+            bool isHealTick   = kind == FlyTextKind.Healing
+                             || kind == FlyTextKind.HealingCrit;
+
+            if (!isDamageTick && !isHealTick) return;
+
+            // icon == 0 means the flytext is a direct hit / auto-attack / direct
+            // heal — these all come through ActionEffectHandler.Receive already.
+            // icon != 0 means a status effect is the source (i.e. DoT/HoT tick).
+            if (icon == 0) return;
+
+            if (val1 <= 0) return;
+
+            var local = _objectTable.LocalPlayer;
+            var localId = local?.EntityId ?? 0;
+            if (localId == 0) return;
+
+            unsafe
+            {
+                var localPtr = (Character*)(local?.Address ?? IntPtr.Zero);
+                var caster = GetOrCreateCombatant(ActiveSession, localId, localPtr);
+                if (caster == null) return;
+
+                var tickMs = (long)(DateTime.UtcNow - ActiveSession.StartTime).TotalMilliseconds;
+                long value = val1;
+
+                if (isDamageTick)
+                {
+                    caster.TotalDamageDealt += value;
+                    caster.DamageEvents.Add((tickMs, value));
+                    RecordAbility(caster.DamageByAbility, DotPseudoActionId,
+                        "Damage over Time", value);
+                }
+                else // isHealTick
+                {
+                    // FlyText doesn't tell us overheal, so log full as actual heal.
+                    // The HoT target is unknown from the event; we can't compute
+                    // overheal without it. Accept the inflation; refinement in §9.7b.
+                    caster.TotalHealingDone += value;
+                    caster.HealingEvents.Add((tickMs, value));
+                    RecordAbility(caster.HealingByAbility, HotPseudoActionId,
+                        "Heal over Time", value);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"DamageMeter: FlyText hook error — {ex.Message}");
+        }
+    }
+
     // ── Dispose ───────────────────────────────────────────────────────────────
     public void Dispose()
     {
         _framework.Update             -= OnFrameworkUpdate;
         _clientState.TerritoryChanged -= OnTerritoryChanged;
+        _flyTextGui.FlyTextCreated    -= OnFlyTextCreated;
         if (ActiveSession != null) EndSession();
         _hook?.Dispose();
         _log.Info("DamageMeter: CombatTracker disposed.");

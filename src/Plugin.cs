@@ -21,6 +21,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IGameInteropProvider    GameInterop     { get; private set; } = null!;
     [PluginService] internal static ITextureProvider        TextureProvider { get; private set; } = null!;
     [PluginService] internal static IPartyList              PartyList       { get; private set; } = null!;
+    [PluginService] internal static IFlyTextGui             FlyTextGui      { get; private set; } = null!;
 
     // ── Cross-assembly static accessor (for DamageMeterUmbra) ─────────────────
     public static Plugin? Instance { get; private set; }
@@ -50,7 +51,7 @@ public sealed class Plugin : IDalamudPlugin
         Tracker = new CombatTracker(
             GameInterop, Log, Condition, ObjectTable,
             ClientState, Framework, DataManager, PartyList,
-            Config, configDir);
+            FlyTextGui, Config, configDir);
 
         _mainWindow     = new MainWindow(this);
         _historyWindow  = new HistoryWindow(this);

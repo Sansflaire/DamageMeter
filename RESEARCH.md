@@ -1341,18 +1341,19 @@ These are gaps in our understanding that need to be resolved through game observ
 
 **Fix sketch:** In the hook loop, after reading `param4`, check `(param4 & 0x80) != 0`. If set, swap `targetData` ↔ `casterData` for that one effect entry only. Refer to `ParseStrategyActionEffect.ReportActionEffect` in the decompiled parser for the canonical pattern (it does this remapping via `IsSourceEntry`).
 
-### 9.7 DoT / HoT Ticks Are NOT Tracked
+### 9.7 DoT / HoT Ticks — PARTIALLY RESOLVED via FlyText (0.2.7)
 
-**Problem:** Damage-over-time ticks (Bio III, Dia, Caustic Bite, Stormbite, Higanbana, etc.) and heal-over-time ticks (Regen, Aspected Benefic, Asylum) do NOT come through `ActionEffectHandler.Receive`. The game computes them server-side on a 3-second status-tick cadence and dispatches them through a separate `EffectResult` / status-tick packet handler. So DamageMeter currently misses all DoT/HoT damage.
+**Background:** DoT ticks don't come through `ActionEffectHandler.Receive`. We searched FFXIVClientStructs 7.51.0.8301 for an exposed `EffectResult` / status-tick hook and found none — there's no clean signature to attach to in CS today.
 
-**Impact:** Bards, DRGs in heavy bleeds, BLM Thunder uptime, SMN Bio uptime, AST sect heals, SCH Bio, WHM Dia — all will under-report.
+**Current implementation:** `CombatTracker.OnFlyTextCreated` subscribes to `IFlyTextGui.FlyTextCreated`. When `kind` is `AutoAttackOrDot{,Dh,Crit,CritDh}` (damage tick) or `Healing{,Crit}` (heal — used for both direct heal and HoT) AND `icon != 0` (the status effect's icon, present for ticks but `0` for plain auto-attacks/direct heals already caught by ActionEffect), we attribute the value to the local player under a single "Damage over Time" / "Heal over Time" pseudo-ability bucket (action IDs `0xFFFF_FFFE` / `0xFFFF_FFFD` to avoid colliding with real action IDs).
 
-**Fix path (architectural):**
-- Option A: Add a Dalamud `FlyTextGui.FlyTextCreated` event subscription. Filter for DoT/HoT kinds. Pro: no extra hook. Con: requires deduping against ActionEffect (some DoTs also appear as direct hits).
-- Option B: Hook a second native function. The likely candidate is `BattleChara.OnEffectResult` or `StatusManager.ProcessEffectResult` in FFXIVClientStructs. Need to find the right signature. Pro: cleanest. Con: more setup, version-fragile.
-- Option C: Subscribe to `BattleChara.StatusManager` changes and run a manual tick simulator (mirrors what FFXIV_ACT_Plugin's `DoTSimulator` does). Pro: works offline. Con: re-implements the game's potency formula.
+**Known limitations (acceptable for v0.2.7):**
+- **Party-member attribution is impossible from FlyText alone.** The event has no source / target entity IDs. Only the local player's DoTs are credited. Other players' DoT damage is still missing.
+- **No per-DoT breakdown.** All DoT ticks are bucketed into one "Damage over Time" entry. We can't split Stormbite from Caustic Bite, or Dia from Glare's DoT. Resolving this needs the icon → status-effect → action mapping, which is a Lumina/Resource lookup.
+- **HoT overheal isn't computed.** Without target HP at tick time, we record the full HoT value as actual healing — slightly inflates HPS for healers. Fixable by polling the target's HP next frame after each HoT tick.
+- **Auto-attack false-negative risk.** Our dedup heuristic is "if `icon == 0` it's a direct hit". If an auto-attack ever carries `icon != 0` for some class/condition, we'd double-count it. Has not been observed yet but worth watching for.
 
-**Recommended:** Start with Option A — it's the smallest code change and covers ~95% of cases. Cross-validate against `FFXIV_ACT_Plugin.Parse.DoTSimulator` (in `devPlugins/DamageMeter/FFXIV_ACT_Plugin/decompiled/parse/DoTSimulator.cs`) when implementing.
+**Next step (v0.3.x):** port `FFXIV_ACT_Plugin.Parse.DoTSimulator` (decompiled, [FFXIV_ACT_Plugin/decompiled/parse/DoTSimulator.cs](FFXIV_ACT_Plugin/decompiled/parse/DoTSimulator.cs)). It tracks status applications from ActionEffect, schedules ticks on a 3-second cadence per target, and computes per-tick damage from the action's base potency × source stats (Crit / Det / DH / SpellSpeed). That gives per-DoT-per-caster attribution to any party member who applied a status. Big port, ~1000 lines incl. helpers, but the source map is now local.
 
 ### 9.8 Crit / Direct-Hit Statistics Not Surfaced
 
