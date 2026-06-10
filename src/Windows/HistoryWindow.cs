@@ -23,6 +23,11 @@ public sealed class HistoryWindow : IDisposable
     /// <summary>If set, the main window will display this session instead of the active one.</summary>
     public CombatSession? PinnedSession { get; private set; }
 
+    /// <summary>External clear — used by MainWindow's "Live" button and by the CombatTracker
+    /// when a new session starts, so the user automatically returns to live data the moment
+    /// they re-enter combat.</summary>
+    public void ClearPin() => PinnedSession = null;
+
     private int _selectedIndex = -1;
     private bool _showTemp  = true;
     private bool _showSaved = true;

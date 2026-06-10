@@ -123,16 +123,36 @@ public sealed class MainWindow : IDisposable
         ImGui.PushStyleColor(ImGuiCol.ButtonActive,    0xFF3A3A70);
 
         // Fixed button widths so layout is predictable regardless of window size
+        const float BtnLive     = 54f;   // "← Live" — only shown when a historical session is pinned
         const float BtnView     = 44f;   // "Chart" / "Graph" — each
         const float BtnHistory  = 62f;
         const float BtnSettings = 68f;
         const float BtnSpacing  =  4f;
         const float RightMargin =  8f;
 
+        bool pinnedHistory = _plugin._historyWindow.PinnedSession != null;
+
         float avail  = ImGui.GetContentRegionAvail().X;
-        float comboW = avail - BtnView * 2 - BtnHistory - BtnSettings - BtnSpacing * 4f - RightMargin;
+        float comboW = avail
+            - (pinnedHistory ? BtnLive + BtnSpacing : 0)
+            - BtnView * 2
+            - BtnHistory - BtnSettings
+            - BtnSpacing * 4f - RightMargin;
 
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 4f);
+
+        // "← Live" appears only when the History window has pinned a past session
+        // for viewing. Clicking it returns the main meter to the live data stream.
+        // Amber-colored so it stands out as a "you are in a non-default state" cue.
+        if (pinnedHistory)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button,        0xFF1A66C8);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0xFF2A88E0);
+            if (ImGui.Button("\u2190 Live##tb", new Vector2(BtnLive, 0)))
+                _plugin._historyWindow.ClearPin();
+            ImGui.PopStyleColor(2);
+            ImGui.SameLine(0, BtnSpacing);
+        }
 
         // Chart / Graph view toggle — push a highlighted color when active.
         DrawViewToggleButton("Chart##tb", ViewMode.Chart, BtnView);

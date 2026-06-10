@@ -59,6 +59,10 @@ public sealed class Plugin : IDalamudPlugin
         _statusApi      = new StatusApi(this);
         _ipcBridge      = new IpcBridge(this);
 
+        // Clear any history-window pin the moment a fresh combat session starts —
+        // the user clearly wants live data once they swing again.
+        Tracker.OnSessionStarted += _ => _historyWindow.ClearPin();
+
         CommandManager.AddHandler(CmdMain, new Dalamud.Game.Command.CommandInfo(OnMainCommand)
         {
             HelpMessage = "Toggle the Damage Meter window."
