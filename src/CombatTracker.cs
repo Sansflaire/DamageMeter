@@ -126,6 +126,9 @@ public sealed class CombatTracker : IDisposable
     // Action ID → IsLimitBreak cache; Lumina lookup is too expensive to do per hit.
     private readonly Dictionary<uint, bool> _limitBreakCache = new();
 
+    // Action ID → IsAutoAttack cache. ActionCategory.RowId == 1 in Lumina = AutoAttack.
+    private readonly Dictionary<uint, bool> _autoAttackCache = new();
+
     // ── Pet/Owner sentinel ─────────────────────────────────────────────────────
     // FFXIV uses 0xE0000000 as the "no owner" / "no target" sentinel. Any other
     // non-zero OwnerId on a Character* points at the entity that owns the pet
@@ -133,19 +136,21 @@ public sealed class CombatTracker : IDisposable
     private const uint NoOwnerSentinel = 0xE0000000;
 
     // ── FlyText/ActionEffect dedup buffer ─────────────────────────────────────
-    // FlyText fires for both direct ActionEffect hits AND for DoT ticks (which
-    // don't come through ActionEffectHandler.Receive). We can't tell the two
-    // apart from the FlyText kind alone — auto-attacks and DoT ticks share the
-    // same FlyTextKind.AutoAttackOrDot{*}.
+    // FlyText AutoAttackOrDot{*} fires for two things only: auto-attacks AND
+    // DoT ticks. Auto-attacks also fire ActionEffectHandler.Receive (we see
+    // them through the hook); DoT ticks don't. So if we record every recent
+    // *auto-attack* ActionEffect value, any matching FlyText is the auto-attack's
+    // own flytext (skip), and any unmatched FlyText is a DoT tick (credit local).
     //
-    // Strategy: every time ProcessEffects records a damage value, push that
-    // (value, time) into a short-lived buffer. When OnFlyTextCreated fires with
-    // a damage-style kind, try to find and consume a matching entry within the
-    // dedup window. Match → it's the ActionEffect's own flytext, ignore. No
-    // match → it must be a DoT tick (or a HoT, party-member damage, etc.).
+    // CRITICAL: we ONLY push values from ActionCategory == 1 (auto-attack) hits.
+    // Pre-fix this buffer was polluted with direct-ability values (Burst Shot,
+    // AoEs, etc.) which fire `Damage*` FlyText that the plugin doesn't consume —
+    // those entries sat in the buffer for the full window and ate real DoT ticks
+    // whose value happened to collide. Bard DoTs were under-counted ~97% as a
+    // result. With the buffer limited to auto-attacks, collisions are rare.
     //
-    // The buffer is intentionally a List<(long,long)> instead of Queue<T> because
-    // we need to remove arbitrary entries on match (not just FIFO).
+    // The buffer is List<(long,long)> instead of Queue<T> so arbitrary entries
+    // can be removed on match (not just FIFO).
     private const long DedupWindowMs = 350;
     private readonly List<(long Value, long TickMs)> _recentDamageHits = new();
     private readonly List<(long Value, long TickMs)> _recentHealHits   = new();
@@ -459,10 +464,13 @@ public sealed class CombatTracker : IDisposable
                         bool killingBlow = IsKillingBlow(targetId, value);
                         bool isSelfHit   = targetId == casterEntityId;
 
-                        // Push this value into the FlyText dedup buffer regardless
-                        // of whether we credit the caster — a matching FlyText event
-                        // is going to fire and we want to skip it cleanly.
-                        RecordRecentHit(_recentDamageHits, value, tickMs);
+                        // Only push auto-attack values into the dedup buffer — those
+                        // are the only ActionEffects that share FlyTextKind with DoT
+                        // ticks. Direct hits fire `Damage*` FlyText which the plugin
+                        // doesn't dedup against, so pushing them just created false
+                        // collisions that swallowed real DoT ticks.
+                        if (IsAutoAttackAction(actionId))
+                            RecordRecentHit(_recentDamageHits, value, tickMs);
 
                         // Damage dealt: record for any hit that isn't a self-hit.
                         // Self-heals like Recuperate arrive as EffectKind.Damage with
@@ -806,6 +814,23 @@ public sealed class CombatTracker : IDisposable
         }
         catch { /* unknown action id — leave false */ }
         _limitBreakCache[actionId] = result;
+        return result;
+    }
+
+    // ActionCategory.RowId == 1 in Lumina = AutoAttack. These (and only these)
+    // produce FlyTextKind.AutoAttackOrDot{*}, the same kind DoT ticks use.
+    private bool IsAutoAttackAction(uint actionId)
+    {
+        if (_autoAttackCache.TryGetValue(actionId, out var cached)) return cached;
+        bool result = false;
+        try
+        {
+            var sheet = _dataManager.GetExcelSheet<Lumina.Excel.Sheets.Action>();
+            var row   = sheet?.GetRow(actionId);
+            result = row?.ActionCategory.RowId == 1;
+        }
+        catch { /* unknown action id — leave false */ }
+        _autoAttackCache[actionId] = result;
         return result;
     }
 
