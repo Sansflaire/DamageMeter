@@ -54,27 +54,34 @@ public sealed class CombatTracker : IDisposable
     // and "OtherDamage = 11" was actually MpGain — see RESEARCH.md §1.5.
     private enum EffectKind : byte
     {
-        Nothing                 = 0,
-        Miss                    = 1,
-        FullResist              = 2,
-        Damage                  = 3,
-        Heal                    = 4,    // was 14 (which is actually GpGain)
-        BlockedDamage           = 5,    // was 4 (which is actually Heal)
-        ParriedDamage           = 6,    // was 5
-        Invulnerable            = 7,    // was 6
-        NoEffectText            = 8,
-        MpLoss                  = 10,
-        MpGain                  = 11,   // previously misnamed "OtherDamage" and counted as damage
-        TpLoss                  = 12,
-        TpGain                  = 13,
-        GpGain                  = 14,   // was previously labeled "Heal" here
-        ApplyStatusEffectTarget = 15,
-        ApplyStatusEffectSource = 16,
-        StatusNoEffect          = 20,
-        Knockback               = 33,
-        Mount                   = 40,
-        VFX                     = 59,
-        JobGauge                = 61,
+        Nothing                   = 0,
+        Miss                      = 1,
+        FullResist                = 2,
+        Damage                    = 3,
+        Heal                      = 4,
+        BlockedDamage             = 5,
+        ParriedDamage             = 6,
+        Invulnerable              = 7,
+        NoEffectText              = 8,
+        MpLoss                    = 10,
+        MpGain                    = 11,
+        TpLoss                    = 12,
+        TpGain                    = 13,
+        // 14/15/16 corrected from prior off-by-one (had 14=GpGain, 15=Target,
+        // 16=Source). Ground-truthed against FFXIV_ACT_Plugin's EffectEntryType
+        // and confirmed live: pressing Caustic Bite at lv80 emitted a slot-1
+        // entry with kind=14 and val=1200 (the Caustic Bite status id), which
+        // can only be ApplyStatusEffectTarget. Bards have no GP gauge.
+        ApplyStatusEffectTarget   = 14,
+        ApplyStatusEffectSource   = 15,
+        RecoveredFromStatusEffect = 16,
+        LoseStatusEffectTarget    = 17,
+        LoseStatusEffectSource    = 18,
+        StatusNoEffect            = 20,
+        Knockback                 = 33,
+        Mount                     = 40,
+        VFX                       = 59,
+        JobGauge                  = 61,
     }
 
     private unsafe delegate void ReceiveActionEffectDelegate(
@@ -165,9 +172,40 @@ public sealed class CombatTracker : IDisposable
     //
     // The buffer is List<(long,long)> instead of Queue<T> so arbitrary entries
     // can be removed on match (not just FIFO).
-    private const long DedupWindowMs = 350;
+    // 350ms was the original guess; the 0.2.10 combat log shows FlyText for
+    // auto-attacks consistently arriving 600–1000 ms after the ActionEffect
+    // (the game queues damage flytexts to avoid visual overlap on screen). At
+    // 350 ms most of them never dedup, so Shot/Burst Shot/enemy AA values were
+    // being credited as DoT ticks — exactly the inflation the user reported.
+    // 2000 ms is comfortably above observed maxes while still narrower than
+    // the slowest auto-attack cadence so buffer collision risk stays low.
+    private const long DedupWindowMs = 2000;
     private readonly List<(long Value, long TickMs)> _recentDamageHits = new();
     private readonly List<(long Value, long TickMs)> _recentHealHits   = new();
+
+    // ── Active DoTs applied by the local player ───────────────────────────────
+    // We can't tell from a FlyText event which target tick'd or which DoT it
+    // came from. But when ProcessEffects sees EffectKind.ApplyStatusEffectTarget
+    // (kind 14) with caster=local, we know the user just applied a status to
+    // an enemy. Track those and attribute unmatched DoT FlyTexts to the active
+    // DoT whose last tick is the most overdue. Multi-DoT bards (Stormbite +
+    // Caustic Bite) then see ticks split between the two action names instead
+    // of dumped into one generic "Damage over Time" bucket.
+    private sealed class ActiveDot
+    {
+        public uint   TargetId;
+        public uint   ActionId;
+        public string ActionName = "";
+        public long   AppliedAtMs;
+        public long   LastTickAtMs;
+        public long   ExpiresAtMs;
+    }
+    private readonly List<ActiveDot> _activeDots = new();
+    // Most DoT-applying actions in the game last 30s, 45s, or 60s. We don't
+    // know the exact duration per status without a Lumina Status-sheet lookup
+    // (TODO), so a generous 60s window is the default — overestimates expiry
+    // for short DoTs but never under-credits a still-running tick.
+    private const long DefaultDotDurationMs = 60_000;
 
     public CombatSession? ActiveSession { get; private set; }
     public SessionStore   Store         { get; private set; } = new();
@@ -339,6 +377,8 @@ public sealed class CombatTracker : IDisposable
     // ── Session lifecycle ─────────────────────────────────────────────────────
     private void StartSession()
     {
+        if (ActiveSession != null) return;       // guard against double start
+        _activeDots.Clear();                     // fresh DoT tracking per pull
         var zone    = GetZoneName();
         var now     = DateTime.UtcNow;
         ActiveSession = new CombatSession
@@ -444,8 +484,23 @@ public sealed class CombatTracker : IDisposable
     {
         try
         {
-            if (ActiveSession != null && header->NumTargets > 0)
-                ProcessEffects(casterEntityId, casterPtr, header, effects, targetEntityIds);
+            if (header->NumTargets > 0)
+            {
+                // Retroactive session start. The InCombat ConditionFlag flips a
+                // few hundred ms AFTER the first damage exchange — long enough
+                // to lose an opening Stormbite (instant cast, applies DoT and
+                // ~11k damage before the in-combat state goes live). Confirmed
+                // against ACT + in-game combat log: Stormbite landed but the
+                // plugin had ActiveSession == null and dropped the effect.
+                // Fix: if local is the caster AND any effect entry is damage,
+                // start the session here. The framework tick still handles the
+                // common path; this just closes the pre-combat race.
+                if (ActiveSession == null && HasLocalCasterDamage(casterEntityId, effects, header->NumTargets))
+                    StartSession();
+
+                if (ActiveSession != null)
+                    ProcessEffects(casterEntityId, casterPtr, header, effects, targetEntityIds);
+            }
         }
         catch (Exception ex)
         {
@@ -455,6 +510,26 @@ public sealed class CombatTracker : IDisposable
         {
             _hook!.Original(casterEntityId, casterPtr, targetPos, header, effects, targetEntityIds);
         }
+    }
+
+    /// <summary>True if the caster is the local player and at least one effect
+    /// entry on the first target is a damage kind. Cheap scan — only inspects
+    /// the first target's 8 entries.</summary>
+    private unsafe bool HasLocalCasterDamage(
+        uint casterEntityId,
+        ActionEffectHandler.TargetEffects* effects,
+        ushort numTargets)
+    {
+        var localId = _objectTable.LocalPlayer?.EntityId ?? 0;
+        if (localId == 0 || casterEntityId != localId) return false;
+        var effectsBase = (byte*)effects;
+        for (int e = 0; e < EffectsPerTarget; e++)
+        {
+            var kind = (EffectKind)effectsBase[e * EffectSize];
+            if (kind == EffectKind.Damage || kind == EffectKind.BlockedDamage || kind == EffectKind.ParriedDamage)
+                return true;
+        }
+        return false;
     }
 
     private unsafe void ProcessEffects(
@@ -621,9 +696,67 @@ public sealed class CombatTracker : IDisposable
                         }
                         break;
                     }
+
+                    case EffectKind.ApplyStatusEffectTarget:
+                    {
+                        // The user just applied a status to an enemy. If that
+                        // user is the local player, remember the DoT so we can
+                        // attribute its later ticks to this specific ability
+                        // instead of the generic "Damage over Time" bucket.
+                        var localId = _objectTable.LocalPlayer?.EntityId ?? 0;
+                        if (casterEntityId == localId && targetId != casterEntityId
+                            && targetData?.Type == CombatantType.Enemy)
+                        {
+                            RegisterActiveDot(targetId, actionId, actionName, tickMs);
+                        }
+                        break;
+                    }
                 }
             }
         }
+    }
+
+    // ── Active-DoT tracking (local player only) ──────────────────────────────
+    private void RegisterActiveDot(uint targetId, uint actionId, string actionName, long tickMs)
+    {
+        // Same (target, action) re-applied (e.g. Iron Jaws refresh) — bump the
+        // expiry forward and reset the tick clock so the next tick credits to
+        // this fresh application.
+        for (int i = 0; i < _activeDots.Count; i++)
+        {
+            var d = _activeDots[i];
+            if (d.TargetId == targetId && d.ActionId == actionId)
+            {
+                d.AppliedAtMs  = tickMs;
+                d.LastTickAtMs = tickMs;
+                d.ExpiresAtMs  = tickMs + DefaultDotDurationMs;
+                return;
+            }
+        }
+        _activeDots.Add(new ActiveDot
+        {
+            TargetId     = targetId,
+            ActionId     = actionId,
+            ActionName   = actionName,
+            AppliedAtMs  = tickMs,
+            LastTickAtMs = tickMs,
+            ExpiresAtMs  = tickMs + DefaultDotDurationMs,
+        });
+    }
+
+    /// <summary>Returns the active DoT whose last tick is the most overdue, or
+    /// null if no DoT is active. Also prunes expired entries.</summary>
+    private ActiveDot? PickActiveDotForTick(long tickMs)
+    {
+        for (int i = _activeDots.Count - 1; i >= 0; i--)
+            if (_activeDots[i].ExpiresAtMs < tickMs)
+                _activeDots.RemoveAt(i);
+
+        ActiveDot? oldest = null;
+        foreach (var d in _activeDots)
+            if (oldest == null || d.LastTickAtMs < oldest.LastTickAtMs)
+                oldest = d;
+        return oldest;
     }
 
     // ── Ability stats helpers ─────────────────────────────────────────────────
@@ -916,8 +1049,25 @@ public sealed class CombatTracker : IDisposable
                 {
                     caster.TotalDamageDealt += value;
                     caster.DamageEvents.Add((tickMs, value));
-                    RecordAbility(caster.DamageByAbility, DotPseudoActionId,
-                        "Damage over Time", value);
+
+                    // Per-DoT attribution. If the local player has any active
+                    // DoT (recorded when ProcessEffects saw an ApplyStatus-
+                    // EffectTarget from local), credit this tick to the one
+                    // whose last tick is most overdue. Multi-DoT bards then
+                    // see "Stormbite" and "Caustic Bite" rows for their DoT
+                    // contribution. Falls back to the generic "Damage over
+                    // Time" bucket only when no local DoT is active.
+                    var dot = PickActiveDotForTick(tickMs);
+                    if (dot != null)
+                    {
+                        dot.LastTickAtMs = tickMs;
+                        RecordAbility(caster.DamageByAbility, dot.ActionId, dot.ActionName, value);
+                    }
+                    else
+                    {
+                        RecordAbility(caster.DamageByAbility, DotPseudoActionId,
+                            "Damage over Time", value);
+                    }
                 }
                 else // isHealTick
                 {
