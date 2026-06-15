@@ -87,6 +87,19 @@ public sealed class CombatTracker : IDisposable
 
     private Hook<ReceiveActionEffectDelegate>? _hook;
 
+    // ── UseAction hook (captures every button press by anyone, including local) ─
+    private unsafe delegate bool UseActionDelegate(
+        FFXIVClientStructs.FFXIV.Client.Game.ActionManager* thisPtr,
+        FFXIVClientStructs.FFXIV.Client.Game.ActionType     actionType,
+        uint                                                actionId,
+        ulong                                               targetId,
+        uint                                                extraParam,
+        FFXIVClientStructs.FFXIV.Client.Game.ActionManager.UseActionMode mode,
+        uint                                                comboRouteId,
+        bool*                                               outOptAreaTargeted);
+
+    private Hook<UseActionDelegate>? _useActionHook;
+
     // ── Services ──────────────────────────────────────────────────────────────
     private readonly IPluginLog   _log;
     private readonly ICondition   _condition;
@@ -101,6 +114,7 @@ public sealed class CombatTracker : IDisposable
     private bool          _wasInCombat;
     private readonly Configuration _config;
     private readonly string        _storePath;
+    private readonly CombatLog     _combatLog;
 
     // Instance summary tracking: record time when we enter a new zone so we can
     // collect all sessions recorded there and merge them on zone exit.
@@ -185,6 +199,7 @@ public sealed class CombatTracker : IDisposable
         _flyTextGui  = flyTextGui;
         _config      = config;
         _storePath   = Path.Combine(configDir, "sessions.json");
+        _combatLog   = new CombatLog(configDir);
 
         LoadStore();
 
@@ -194,6 +209,18 @@ public sealed class CombatTracker : IDisposable
             _hook = gameInterop.HookFromAddress<ReceiveActionEffectDelegate>(
                 (nint)addr, OnReceiveActionEffect);
             _hook.Enable();
+
+            try
+            {
+                var useAddr = FFXIVClientStructs.FFXIV.Client.Game.ActionManager.Addresses.UseAction.Value;
+                _useActionHook = gameInterop.HookFromAddress<UseActionDelegate>(
+                    (nint)useAddr, OnUseAction);
+                _useActionHook.Enable();
+            }
+            catch (Exception ex)
+            {
+                _log.Warning($"DamageMeter: UseAction hook failed — {ex.Message}");
+            }
         }
 
         _framework.Update             += OnFrameworkUpdate;
@@ -320,6 +347,21 @@ public sealed class CombatTracker : IDisposable
             ZoneName  = zone,
             StartTime = now,
         };
+        // Open per-session JSONL combat log. Lets us replay any fight to
+        // diagnose missing-damage bugs (e.g. Stormbite not showing up).
+        try
+        {
+            var local = _objectTable.LocalPlayer;
+            var meta = "\"sessionId\":\"" + CombatLog.Esc(ActiveSession.Id) + "\"," +
+                       "\"zone\":\"" + CombatLog.Esc(zone) + "\"," +
+                       "\"startUtc\":\"" + now.ToString("o") + "\"," +
+                       "\"localId\":" + (local?.EntityId ?? 0) + "," +
+                       "\"localName\":\"" + CombatLog.Esc(local?.Name.TextValue ?? "") + "\"," +
+                       "\"localJob\":" + (local is IBattleChara b ? b.ClassJob.RowId : 0);
+            _combatLog.StartSession(ActiveSession.Id, now, meta);
+        }
+        catch (Exception ex) { _log.Warning($"DamageMeter: CombatLog start failed — {ex.Message}"); }
+
         _log.Info($"DamageMeter: Combat started — {ActiveSession.Id}");
         OnSessionStarted?.Invoke(ActiveSession);
     }
@@ -336,6 +378,7 @@ public sealed class CombatTracker : IDisposable
             SaveStore();
         }
 
+        _combatLog.EndSession();
         _log.Info($"DamageMeter: Combat ended — {ActiveSession.Id} ({ActiveSession.FormattedDuration})");
         OnSessionEnded?.Invoke(ActiveSession);
         ActiveSession = null;
@@ -345,6 +388,49 @@ public sealed class CombatTracker : IDisposable
     {
         while (Store.TempSessions.Count > _config.MaxTempHistory)
             Store.TempSessions.RemoveAt(0);
+    }
+
+    // ── UseAction hook (button-press logger) ──────────────────────────────────
+    // Fires for every action the local ActionManager attempts. We only LOG when
+    // a session is active and the caller is the local player — enough to
+    // reconstruct what the user pressed during a fight. The hook itself is
+    // pass-through; we never alter the return or args.
+    private unsafe bool OnUseAction(
+        FFXIVClientStructs.FFXIV.Client.Game.ActionManager* thisPtr,
+        FFXIVClientStructs.FFXIV.Client.Game.ActionType     actionType,
+        uint                                                actionId,
+        ulong                                               targetId,
+        uint                                                extraParam,
+        FFXIVClientStructs.FFXIV.Client.Game.ActionManager.UseActionMode mode,
+        uint                                                comboRouteId,
+        bool*                                               outOptAreaTargeted)
+    {
+        bool ret = false;
+        try
+        {
+            ret = _useActionHook!.Original(thisPtr, actionType, actionId, targetId, extraParam, mode, comboRouteId, outOptAreaTargeted);
+        }
+        catch (Exception ex) { _log.Error($"DamageMeter: UseAction original failed — {ex.Message}"); }
+
+        try
+        {
+            if (ActiveSession != null)
+            {
+                var name = GetActionName(actionId);
+                var json = "\"e\":\"use\"," +
+                           "\"at\":" + (uint)actionType + "," +
+                           "\"aid\":" + actionId + "," +
+                           "\"an\":\"" + CombatLog.Esc(name) + "\"," +
+                           "\"tgt\":" + targetId + "," +
+                           "\"mode\":" + (uint)mode + "," +
+                           "\"combo\":" + comboRouteId + "," +
+                           "\"result\":" + (ret ? "true" : "false");
+                _combatLog.Write(json);
+            }
+        }
+        catch (Exception ex) { _log.Error($"DamageMeter: UseAction log failed — {ex.Message}"); }
+
+        return ret;
     }
 
     // ── ActionEffect hook ─────────────────────────────────────────────────────
@@ -445,6 +531,7 @@ public sealed class CombatTracker : IDisposable
 
                 bool isCritical  = (param0 & 0x20) != 0;
                 bool isDirectHit = (param0 & 0x40) != 0;
+                bool isSourceEntry = (param4 & 0x80) != 0;
                 var casterName = casterData?.Name ?? $"#{casterEntityId}";
                 var targetName = targetData?.Name ?? $"#{targetId}";
                 var casterType = casterData?.Type.ToString() ?? "null";
@@ -454,6 +541,28 @@ public sealed class CombatTracker : IDisposable
                            (isCritical ? " CRIT" : "") + (isDirectHit ? " DH" : "") +
                            $" caster={casterName}[{casterType}] target={targetName}[{targetType}]" +
                            (targetId == casterEntityId ? " SELF" : ""));
+
+                // JSONL log entry per effect entry — captures kind, value, flags,
+                // caster/target IDs. The log file is the source of truth for
+                // diagnosing "why didn't X show up in the meter".
+                try
+                {
+                    var json = "\"e\":\"effect\"," +
+                               "\"kind\":" + (byte)kind + "," +
+                               "\"aid\":" + actionId + "," +
+                               "\"an\":\"" + CombatLog.Esc(actionName) + "\"," +
+                               "\"caster\":" + casterEntityId + "," +
+                               "\"target\":" + targetId + "," +
+                               "\"effCaster\":" + (casterData?.EntityId ?? 0) + "," +
+                               "\"val\":" + value + "," +
+                               "\"crit\":" + (isCritical ? "true" : "false") + "," +
+                               "\"dh\":" + (isDirectHit ? "true" : "false") + "," +
+                               "\"src\":" + (isSourceEntry ? "true" : "false") + "," +
+                               "\"slot\":" + e + "," +
+                               "\"isAA\":" + (IsAutoAttackAction(actionId) ? "true" : "false");
+                    _combatLog.Write(json);
+                }
+                catch { /* never fail combat over a log entry */ }
 
                 switch (kind)
                 {
@@ -746,21 +855,50 @@ public sealed class CombatTracker : IDisposable
             bool isHealTick   = kind == FlyTextKind.Healing
                              || kind == FlyTextKind.HealingCrit;
 
-            if (!isDamageTick && !isHealTick) return;
+            if (!isDamageTick && !isHealTick)
+            {
+                // Still log uninteresting kinds so the combat log captures every
+                // FlyText event — useful when an expected ability is missing.
+                try
+                {
+                    _combatLog.Write(
+                        "\"e\":\"flytext\"," +
+                        "\"kind\":\"" + kind + "\"," +
+                        "\"v1\":" + val1 + "," +
+                        "\"v2\":" + val2 + "," +
+                        "\"icon\":" + icon + "," +
+                        "\"dti\":" + damageTypeIcon + "," +
+                        "\"handled\":false");
+                }
+                catch { }
+                return;
+            }
             if (val1 <= 0) return;
 
             var tickMs = (long)(DateTime.UtcNow - ActiveSession.StartTime).TotalMilliseconds;
 
             // Value-based dedup against the ring buffer ProcessEffects fills as
-            // it records hits. A FlyText that matches a recent ActionEffect IS
-            // that ActionEffect's flytext — skip it. No match = a tick the hook
-            // didn't see, i.e. a DoT/HoT.
-            //
-            // The 0.2.6 icon != 0 filter was wrong: DoT ticks fire with icon==0
-            // (FFXIV doesn't paint a status icon next to the floating number),
-            // so the filter swallowed every Dia / Bio / Higanbana tick.
-            var dedupBuf = isHealTick ? _recentHealHits : _recentDamageHits;
-            if (TryConsumeRecentHit(dedupBuf, val1, tickMs)) return;
+            // it records auto-attack hits. A FlyText that matches a recent
+            // auto-attack ActionEffect IS that ActionEffect's flytext — skip it.
+            // No match = a tick the hook didn't see, i.e. a DoT/HoT.
+            var dedupBuf  = isHealTick ? _recentHealHits : _recentDamageHits;
+            bool dedupHit = TryConsumeRecentHit(dedupBuf, val1, tickMs);
+
+            try
+            {
+                _combatLog.Write(
+                    "\"e\":\"flytext\"," +
+                    "\"kind\":\"" + kind + "\"," +
+                    "\"v1\":" + val1 + "," +
+                    "\"v2\":" + val2 + "," +
+                    "\"icon\":" + icon + "," +
+                    "\"dti\":" + damageTypeIcon + "," +
+                    "\"dedup\":" + (dedupHit ? "true" : "false") + "," +
+                    "\"credited\":" + (dedupHit ? "false" : "true"));
+            }
+            catch { }
+
+            if (dedupHit) return;
 
             var local = _objectTable.LocalPlayer;
             var localId = local?.EntityId ?? 0;
@@ -885,6 +1023,8 @@ public sealed class CombatTracker : IDisposable
         _flyTextGui.FlyTextCreated    -= OnFlyTextCreated;
         if (ActiveSession != null) EndSession();
         _hook?.Dispose();
+        _useActionHook?.Dispose();
+        _combatLog.Dispose();
         _log.Info("DamageMeter: CombatTracker disposed.");
     }
 }
