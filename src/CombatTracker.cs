@@ -208,6 +208,26 @@ public sealed class CombatTracker : IDisposable
     // for short DoTs but never under-credits a still-running tick.
     private const long DefaultDotDurationMs = 60_000;
 
+    // ── Network-free DoT simulator (replaces FlyText fallback) ────────────────
+    private readonly DoTSimulator _dotSim;
+    // Caches the local player's crit/DH rate so the simulator can roll per-tick
+    // crits without re-reading every frame. Re-sampled on each ApplyStatus
+    // event from the latest local-cast direct hit (simplest stat snapshot).
+    // For BRD at level 80 typical values are ~25% / ~25%; defaults until we
+    // see any local crit/DH telemetry.
+    private double _localCritRate = 0.25;
+    private double _localDhRate   = 0.25;
+    private int    _localCritHits, _localTotalHits;
+    private int    _localDhHits;
+
+    // Per-packet "remember the initial-hit value" registers. Reset at the top
+    // of every ProcessEffects call. Lets the ApplyStatusEffectTarget handler
+    // see what the same-packet Damage entry rolled, even though they're
+    // separate iterations in the effect loop.
+    private long _packetInitDamage;
+    private bool _packetInitCrit;
+    private bool _packetInitDh;
+
     public CombatSession? ActiveSession { get; private set; }
     public SessionStore   Store         { get; private set; } = new();
 
@@ -241,6 +261,7 @@ public sealed class CombatTracker : IDisposable
         _config      = config;
         _storePath   = Path.Combine(configDir, "sessions.json");
         _combatLog   = new CombatLog(configDir);
+        _dotSim      = new DoTSimulator(log);
 
         LoadStore();
 
@@ -279,6 +300,60 @@ public sealed class CombatTracker : IDisposable
         if (inCombat && !_wasInCombat) StartSession();
         if (!inCombat && _wasInCombat) EndSession();
         _wasInCombat = inCombat;
+
+        // Drain any DoT ticks that have come due. Each tick is credited to the
+        // local player's combatant under "{DotName} (DoT)" via a pseudo-action
+        // id (real-action id with the high bit set) so initial-hit rows and
+        // tick rows stay separate in the meter.
+        if (ActiveSession != null)
+        {
+            var tickMs = (long)(DateTime.UtcNow - ActiveSession.StartTime).TotalMilliseconds;
+            var ticks  = _dotSim.AdvanceTo(tickMs);
+            if (ticks.Count > 0)
+                DrainSimulatorTicks(ticks, tickMs);
+        }
+    }
+
+    private const uint DotPseudoActionMask = 0x8000_0000u;
+
+    private void DrainSimulatorTicks(
+        List<(DoTSimulator.SimulatedDot Dot, long Value, bool Crit, bool Dh)> ticks,
+        long tickMs)
+    {
+        if (ActiveSession == null) return;
+        unsafe
+        {
+            var local   = _objectTable.LocalPlayer;
+            var localId = local?.EntityId ?? 0;
+            if (localId == 0) return;
+            var localPtr = (Character*)(local?.Address ?? IntPtr.Zero);
+            var caster   = GetOrCreateCombatant(ActiveSession, localId, localPtr);
+            if (caster == null) return;
+
+            foreach (var t in ticks)
+            {
+                var pseudoId = t.Dot.ActionId | DotPseudoActionMask;
+                caster.TotalDamageDealt += t.Value;
+                caster.DamageEvents.Add((tickMs, t.Value));
+                RecordAbility(caster.DamageByAbility, pseudoId, t.Dot.DotName, t.Value);
+
+                try
+                {
+                    _combatLog.Write(
+                        "\"e\":\"sim_tick\"," +
+                        "\"aid\":" + t.Dot.ActionId + "," +
+                        "\"name\":\"" + CombatLog.Esc(t.Dot.DotName) + "\"," +
+                        "\"tgt\":" + t.Dot.TargetId + "," +
+                        "\"val\":" + t.Value + "," +
+                        "\"crit\":" + (t.Crit ? "true" : "false") + "," +
+                        "\"dh\":" + (t.Dh ? "true" : "false") + "," +
+                        "\"baseline\":" + t.Dot.TickBaseline.ToString("F2") + "," +
+                        "\"critRate\":" + t.Dot.CritRate.ToString("F3") + "," +
+                        "\"dhRate\":" + t.Dot.DhRate.ToString("F3"));
+                }
+                catch { }
+            }
+        }
     }
 
     // ── Territory change → instance summary ───────────────────────────────────
@@ -384,6 +459,8 @@ public sealed class CombatTracker : IDisposable
     {
         if (ActiveSession != null) return;       // guard against double start
         _activeDots.Clear();                     // fresh DoT tracking per pull
+        _dotSim.Reset();
+        _localCritHits = _localDhHits = _localTotalHits = 0;
         var zone    = GetZoneName();
         var now     = DateTime.UtcNow;
         ActiveSession = new CombatSession
@@ -423,6 +500,7 @@ public sealed class CombatTracker : IDisposable
             SaveStore();
         }
 
+        _dotSim.EndSession();
         _combatLog.EndSession();
         _log.Info($"DamageMeter: Combat ended — {ActiveSession.Id} ({ActiveSession.FormattedDuration})");
         OnSessionEnded?.Invoke(ActiveSession);
@@ -487,6 +565,13 @@ public sealed class CombatTracker : IDisposable
         ActionEffectHandler.TargetEffects* effects,
         GameObjectId*                      targetEntityIds)
     {
+        // Reset per-packet snapshot registers. Any local-cast Damage entry
+        // inside ProcessEffects will refill these; the same packet's
+        // ApplyStatusEffectTarget entry reads them.
+        _packetInitDamage = 0;
+        _packetInitCrit   = false;
+        _packetInitDh     = false;
+
         try
         {
             if (header->NumTargets > 0)
@@ -653,6 +738,29 @@ public sealed class CombatTracker : IDisposable
                         bool killingBlow = IsKillingBlow(targetId, value);
                         bool isSelfHit   = targetId == casterEntityId;
 
+                        // Remember the initial-hit characteristics for this
+                        // packet so the ApplyStatusEffectTarget slot (which
+                        // arrives later in the same effect array) can hand the
+                        // simulator a clean stat snapshot.
+                        var localIdHit = _objectTable.LocalPlayer?.EntityId ?? 0;
+                        if (casterEntityId == localIdHit && !isSelfHit)
+                        {
+                            _packetInitDamage = value;
+                            _packetInitCrit   = isCritical;
+                            _packetInitDh     = isDirectHit;
+
+                            // Rolling-average crit/DH rate from observed local
+                            // hits. Used by the simulator for per-tick rolls.
+                            _localTotalHits++;
+                            if (isCritical)  _localCritHits++;
+                            if (isDirectHit) _localDhHits++;
+                            if (_localTotalHits >= 5)
+                            {
+                                _localCritRate = (double)_localCritHits / _localTotalHits;
+                                _localDhRate   = (double)_localDhHits   / _localTotalHits;
+                            }
+                        }
+
                         // Only push auto-attack values into the dedup buffer — those
                         // are the only ActionEffects that share FlyTextKind with DoT
                         // ticks. Direct hits fire `Damage*` FlyText which the plugin
@@ -704,11 +812,33 @@ public sealed class CombatTracker : IDisposable
 
                     case EffectKind.ApplyStatusEffectTarget:
                     {
-                        // The user just applied a status to an enemy. If that
-                        // user is the local player, remember the DoT so we can
-                        // attribute its later ticks to this specific ability
-                        // instead of the generic "Damage over Time" bucket.
+                        // The user just applied a status to an enemy. If the
+                        // caster is the local player AND we have a recorded
+                        // initial hit value from the same packet, hand it to
+                        // the DoT simulator: the simulator will schedule the
+                        // tick stream and produce per-tick damage events the
+                        // framework loop drains every frame.
                         var localId = _objectTable.LocalPlayer?.EntityId ?? 0;
+                        if (casterEntityId == localId && targetId != casterEntityId
+                            && targetData?.Type == CombatantType.Enemy
+                            && DoTSimulator.IsKnownDot(actionId))
+                        {
+                            _dotSim.OnApply(
+                                targetId:        targetId,
+                                casterId:        localId,
+                                actionId:        actionId,
+                                initialHitValue: _packetInitDamage,
+                                initialCrit:     _packetInitCrit,
+                                initialDh:       _packetInitDh,
+                                casterCritRate:  _localCritRate,
+                                casterDhRate:    _localDhRate,
+                                tickMs:          tickMs);
+                        }
+
+                        // Keep the legacy generic tracker for now so the old
+                        // FlyText fallback (if it ever fires) still has a
+                        // place to attribute. Harmless when the simulator is
+                        // running.
                         if (casterEntityId == localId && targetId != casterEntityId
                             && targetData?.Type == CombatantType.Enemy)
                         {
