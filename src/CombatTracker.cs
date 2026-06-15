@@ -268,6 +268,7 @@ public sealed class CombatTracker : IDisposable
         _clientState.TerritoryChanged += OnTerritoryChanged;
         _flyTextGui.FlyTextCreated    += OnFlyTextCreated;
         _chatGui.ChatMessage          += OnChatMessage;
+        _chatGui.LogMessage           += OnLogMessage;
         _log.Info("DamageMeter: CombatTracker initialized.");
     }
 
@@ -1169,6 +1170,61 @@ public sealed class CombatTracker : IDisposable
     // so the structure of a real Stormbite/Caustic Bite tick line is visible.
     // Once we have a captured sample, we'll write the typed parser and route
     // DoT damage through this path instead of FlyText.
+    // ── Log-message stream → DoT tick capture ────────────────────────────────
+    //
+    // ILogMessage is the lower-level event. It fires for every combat log
+    // entry the game generates, including ones the user's chat filter
+    // suppresses from the visible chat window. It also carries structured
+    // data: SourceEntity, TargetEntity, and a Parameters list (no string
+    // parsing needed). The chat-log capture in the 09:52 Tower of Zot pull
+    // showed zero DoT tick chat lines — strongly suggesting the user has
+    // continuous-damage entries filtered out client-side. LogMessage should
+    // catch them anyway.
+    //
+    // Diagnostic only for this commit: dump LogMessageId, source/target
+    // names + ObjStrIds, and the parameter list, so the next pull tells us
+    // exactly which LogMessageId(s) carry Stormbite/Caustic Bite ticks and
+    // what the parameter order is. Real attribution wires in after that.
+    private void OnLogMessage(Dalamud.Game.Chat.ILogMessage msg)
+    {
+        try
+        {
+            if (ActiveSession == null) return;
+
+            var srcName = msg.SourceEntity?.Name.ToString() ?? "";
+            var tgtName = msg.TargetEntity?.Name.ToString() ?? "";
+            var srcId   = msg.SourceEntity?.ObjStrId ?? 0;
+            var tgtId   = msg.TargetEntity?.ObjStrId ?? 0;
+
+            // Parameters are unsigned-int-ish values; the damage value, action
+            // id, and similar tend to be in here. We dump up to the first 8
+            // to keep payload size sensible.
+            var sb = new System.Text.StringBuilder();
+            sb.Append('[');
+            int n = 0;
+            if (msg.Parameters != null)
+            {
+                foreach (var p in msg.Parameters)
+                {
+                    if (n++ > 0) sb.Append(',');
+                    sb.Append(p);
+                    if (n >= 8) break;
+                }
+            }
+            sb.Append(']');
+
+            _combatLog.Write(
+                "\"e\":\"log\"," +
+                "\"id\":" + msg.LogMessageId + "," +
+                "\"srcName\":\"" + CombatLog.Esc(srcName) + "\"," +
+                "\"srcId\":" + srcId + "," +
+                "\"tgtName\":\"" + CombatLog.Esc(tgtName) + "\"," +
+                "\"tgtId\":" + tgtId + "," +
+                "\"params\":" + sb);
+        }
+        catch (Exception ex) { _log.Error($"DamageMeter: LogMessage capture failed — {ex.Message}"); }
+    }
+
     private void OnChatMessage(Dalamud.Game.Chat.IHandleableChatMessage chat)
     {
         try
@@ -1219,6 +1275,7 @@ public sealed class CombatTracker : IDisposable
         _clientState.TerritoryChanged -= OnTerritoryChanged;
         _flyTextGui.FlyTextCreated    -= OnFlyTextCreated;
         _chatGui.ChatMessage          -= OnChatMessage;
+        _chatGui.LogMessage           -= OnLogMessage;
         if (ActiveSession != null) EndSession();
         _hook?.Dispose();
         _useActionHook?.Dispose();
