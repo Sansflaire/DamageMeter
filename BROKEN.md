@@ -134,3 +134,48 @@ lookup always misses on mixed-case IDs.
   for parameter segments.
 - When a diagnostic API "doesn't work" during debugging, check the API
   parsing before re-investigating the data — it cost me a few rounds here.
+
+---
+
+## 6. Used `IFlyTextGui` as the DoT-tick data source
+
+**Date:** entered the codebase in 0.2.6, diagnosed 2026-06-15.
+
+**What:** Bard DoTs (Stormbite, Caustic Bite) consistently went missing or
+under-counted. After fixing the dedup buffer + window in 0.2.10, a clean
+11-second test fight still recorded **zero** DoT damage — and yet ACT showed
+3 Stormbite + 2 Caustic Bite ticks for the same fight, and FFXIV's in-game
+combat log also showed the DoT activity. The combat-log JSONL I added for
+diagnostics captured every FlyText event the plugin received: not one had a
+value or kind consistent with a DoT tick. So the ticks were definitely
+landing — the plugin just wasn't seeing them.
+
+**Why:** `IFlyTextGui.FlyTextCreated` only fires when FFXIV actually renders
+the floating number popup above a target. Whether that popup renders is
+gated by the user's in-game Pop-up Text settings (System Configuration →
+Character Configuration → Log Window → Pop-up Text). If "continuous damage"
+text is disabled, the floating number never appears and the Dalamud event
+never fires — *but the damage still happens server-side and still shows up
+in the combat log and in ACT (which reads packets directly)*. So FlyText is
+"the things the player can see floating on screen," not "everything that
+deals damage." Treating it as a damage source was structurally wrong.
+
+I then doubled down by telling Trist "your pop-up setting is off" — but
+that's just the symptom. The fix isn't to push his game settings around; the
+fix is to stop using a display-layer event for combat-data capture.
+
+**Rule going forward:**
+- **Never use `IFlyTextGui` as a *source of truth* for combat events.** It's
+  a UI signal. Use it only for things that are inherently UI ("did the
+  player see this popup"), never for "did this damage happen."
+- **For combat data the user can verify from their in-game combat log,
+  capture it from the same path FFXIV uses for the combat log** —
+  `IChatGui.ChatMessage` with the combat XivChatType variants, or hook the
+  EffectResult network packet, or port the DoTSimulator (compute ticks from
+  status applications + caster stats, FFXIV_ACT_Plugin's approach). FlyText
+  is downstream of all of these and can be silently filtered by client
+  settings.
+- **When a user shows the in-game combat log as proof of activity the
+  plugin missed, that's a near-certain sign the plugin is reading from the
+  wrong layer.** Don't argue the user's game settings — find the canonical
+  data source.
