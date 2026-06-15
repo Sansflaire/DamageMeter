@@ -89,10 +89,18 @@ public sealed class DoTSimulator
     public static bool IsKnownDot(uint actionId) => Table.ContainsKey(actionId);
     public static DotDef? Lookup(uint actionId)  => Table.TryGetValue(actionId, out var d) ? d : null;
 
-    // Iron Jaws / equivalents — refresh existing DoTs without dealing a new
-    // initial hit. Found by mapping action category + status grain checks; for
-    // now the hardcoded list is fine and tiny.
-    public static readonly HashSet<uint> RefreshActions = new() { 3559 /* Iron Jaws */ };
+    // Iron Jaws / equivalents — refresh existing DoTs without applying a new
+    // status, but DO deal direct damage of their own. The simulator must see
+    // the cast so it can slide the schedule forward.
+    //   3560 = Iron Jaws (BRD lv56+). Confirmed live against ACT's network log.
+    // Earlier (incorrect) entry was 3559 which is a different action entirely.
+    public static readonly HashSet<uint> RefreshActions = new() { 3560 /* Iron Jaws */ };
+
+    // True if the simulator should process this action at all — either it's a
+    // DoT-applying action with a defined snapshot, or it's a refresh action
+    // that needs to slide the existing schedule forward.
+    public static bool IsSimulatorRelevant(uint actionId)
+        => Table.ContainsKey(actionId) || RefreshActions.Contains(actionId);
 
     // ── A live DoT being simulated ────────────────────────────────────────────
     public sealed class SimulatedDot

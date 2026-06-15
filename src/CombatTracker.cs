@@ -821,7 +821,7 @@ public sealed class CombatTracker : IDisposable
                         var localId = _objectTable.LocalPlayer?.EntityId ?? 0;
                         if (casterEntityId == localId && targetId != casterEntityId
                             && targetData?.Type == CombatantType.Enemy
-                            && DoTSimulator.IsKnownDot(actionId))
+                            && DoTSimulator.IsSimulatorRelevant(actionId))
                         {
                             _dotSim.OnApply(
                                 targetId:        targetId,
