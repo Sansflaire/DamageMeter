@@ -1051,27 +1051,18 @@ public sealed class CombatTracker : IDisposable
 
                 if (isDamageTick)
                 {
-                    caster.TotalDamageDealt += value;
-                    caster.DamageEvents.Add((tickMs, value));
-
-                    // Per-DoT attribution. If the local player has any active
-                    // DoT (recorded when ProcessEffects saw an ApplyStatus-
-                    // EffectTarget from local), credit this tick to the one
-                    // whose last tick is most overdue. Multi-DoT bards then
-                    // see "Stormbite" and "Caustic Bite" rows for their DoT
-                    // contribution. Falls back to the generic "Damage over
-                    // Time" bucket only when no local DoT is active.
-                    var dot = PickActiveDotForTick(tickMs);
-                    if (dot != null)
-                    {
-                        dot.LastTickAtMs = tickMs;
-                        RecordAbility(caster.DamageByAbility, dot.ActionId, dot.ActionName, value);
-                    }
-                    else
-                    {
-                        RecordAbility(caster.DamageByAbility, DotPseudoActionId,
-                            "Damage over Time", value);
-                    }
+                    // CREDITING DISABLED. BROKEN.md §6 + §7: FlyText for damage
+                    // can arrive 4–6+ seconds after its ActionEffect because the
+                    // game queues the popups visually. The dedup window can't
+                    // be stretched far enough without making collisions worse;
+                    // any FlyText that escapes is at this point untrustworthy.
+                    // Worse, the previous per-DoT fallback then credited those
+                    // leaked auto-attack values to whichever DoT was active —
+                    // Stormbite/Caustic Bite rows got polluted with Shot crits.
+                    //
+                    // DoT damage capture is being moved entirely onto the chat
+                    // log path (IChatGui). For now we drop unmatched damage
+                    // FlyText silently rather than mis-credit anything.
                 }
                 else // isHealTick
                 {
@@ -1184,6 +1175,9 @@ public sealed class CombatTracker : IDisposable
         {
             if (ActiveSession == null) return;
 
+            // No filter — capture every chat type while a session is active so
+            // we can identify the exact LogKind for DoT/HoT tick lines. Filter
+            // refinement is a later step once the structure is known.
             var type        = chat.LogKind;
             var raw         = (uint)type;
             var senderText  = chat.Sender?.TextValue ?? "";

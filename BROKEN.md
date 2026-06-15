@@ -179,3 +179,47 @@ fix is to stop using a display-layer event for combat-data capture.
   plugin missed, that's a near-certain sign the plugin is reading from the
   wrong layer.** Don't argue the user's game settings — find the canonical
   data source.
+
+---
+
+## 7. Per-DoT FlyText attribution credited misaligned values to live DoTs
+
+**Date:** shipped 2026-06-15 (the same commit that added per-DoT attribution),
+diagnosed 2026-06-15.
+
+**What:** Trist's 13-second test pull showed Stormbite total = 20,958 and
+Caustic Bite total = 20,027 in the meter, both higher than reality. ACT
+showed Stormbite initial = 11,131 (one direct hit) and Caustic Bite initial
+= 13,791 (one direct hit). The extra 9,827 on Stormbite and 6,236 on Caustic
+Bite were the user's Shot crit and a plain Shot — auto-attacks whose
+ActionEffect arrived at t=1,898 ms and t=4,942 ms, but whose FlyText events
+didn't fire until t=6,509 ms. The 2,000 ms dedup window already expired so
+the unmatched FlyTexts cascaded into `PickActiveDotForTick`, which happily
+credited them to the oldest active DoT.
+
+**Why:** Two compounding bad assumptions on my part:
+
+- I treated "FlyText dedup missed" as equivalent to "this must be a DoT
+  tick." That conflation is the bug. FlyText for *any* damage can be queued
+  arbitrarily long behind earlier popups (the visual stagger is unbounded
+  in busy combat). An unmatched damage FlyText could be a DoT tick, a
+  late-arriving auto-attack popup, a late ability hit, an enemy's hit on
+  you — anything. Without source/target IDs on the event, we cannot tell.
+- I then routed these "DoT ticks" through `PickActiveDotForTick`, which
+  always returns *some* active DoT if any are running. The attribution
+  pipeline had no "this looks wrong, drop it" exit. Any leaked value found
+  a home.
+
+**Rule going forward:**
+- **A fallback that always succeeds is not a fallback, it's a bug
+  generator.** Per-DoT attribution must be able to say "I don't know whose
+  tick this is, discard." When the source signal can't be trusted, *don't
+  credit anything*.
+- **FlyText-based DoT credit is now disabled in code.** Unmatched damage
+  FlyTexts are dropped silently. DoT capture moves to the chat-log path
+  exclusively (or, if that proves insufficient, to DoTSimulator).
+- **When fixing one mis-credit problem, double-check you haven't built a
+  worse mis-credit pipeline downstream.** v0.2.10 widened the dedup window
+  to fix v0.2.9's inflation, then immediately added a per-DoT fallback
+  that re-introduced inflation in a different shape. The next reviewer
+  (future-me) should ask "what does this do when the input is wrong?"
