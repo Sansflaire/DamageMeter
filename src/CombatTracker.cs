@@ -787,6 +787,12 @@ public sealed class CombatTracker : IDisposable
                             if (isAoe) targetData.TotalAvoidableDamageTaken += value;
                             RecordAbility(targetData.DamageTakenByAbility, actionId, actionName, value);
                         }
+                        // Target died on this hit — stop any DoTs we're simulating
+                        // against it. Without this the scheduler ticks past the
+                        // kill: a 57s pull showed +14% overcount before this gate
+                        // (49/48 sim ticks vs ACT's 43/42 actual).
+                        if (killingBlow)
+                            _dotSim.OnTargetDied(targetId);
                         break;
                     }
 

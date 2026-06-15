@@ -270,5 +270,13 @@ public sealed class DoTSimulator
     /// clears state.</summary>
     public void EndSession() => _active.Clear();
 
+    /// <summary>Target died — discard any simulated DoTs aimed at it. Without
+    /// this, the scheduler keeps firing ticks past the kill, inflating DoT
+    /// totals (observed 14% overcount in a 57s fight before this gate).</summary>
+    public int OnTargetDied(uint targetId)
+    {
+        return _active.RemoveAll(d => d.TargetId == targetId);
+    }
+
     public int ActiveCount => _active.Count;
 }
