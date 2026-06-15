@@ -51,7 +51,7 @@ public sealed class Plugin : IDalamudPlugin
         Tracker = new CombatTracker(
             GameInterop, Log, Condition, ObjectTable,
             ClientState, Framework, DataManager, PartyList,
-            FlyTextGui, Config, configDir);
+            FlyTextGui, ChatGui, Config, configDir);
 
         _mainWindow     = new MainWindow(this);
         _historyWindow  = new HistoryWindow(this);

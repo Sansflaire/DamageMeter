@@ -116,6 +116,7 @@ public sealed class CombatTracker : IDisposable
     private readonly IDataManager _dataManager;
     private readonly IPartyList   _partyList;
     private readonly IFlyTextGui  _flyTextGui;
+    private readonly IChatGui     _chatGui;
 
     // ── State ─────────────────────────────────────────────────────────────────
     private bool          _wasInCombat;
@@ -224,6 +225,7 @@ public sealed class CombatTracker : IDisposable
         IDataManager         dataManager,
         IPartyList           partyList,
         IFlyTextGui          flyTextGui,
+        IChatGui             chatGui,
         Configuration        config,
         string               configDir)
     {
@@ -235,6 +237,7 @@ public sealed class CombatTracker : IDisposable
         _dataManager = dataManager;
         _partyList   = partyList;
         _flyTextGui  = flyTextGui;
+        _chatGui     = chatGui;
         _config      = config;
         _storePath   = Path.Combine(configDir, "sessions.json");
         _combatLog   = new CombatLog(configDir);
@@ -264,6 +267,7 @@ public sealed class CombatTracker : IDisposable
         _framework.Update             += OnFrameworkUpdate;
         _clientState.TerritoryChanged += OnTerritoryChanged;
         _flyTextGui.FlyTextCreated    += OnFlyTextCreated;
+        _chatGui.ChatMessage          += OnChatMessage;
         _log.Info("DamageMeter: CombatTracker initialized.");
     }
 
@@ -1165,12 +1169,62 @@ public sealed class CombatTracker : IDisposable
             buf.RemoveAt(0);
     }
 
+    // ── Chat log → DoT capture (diagnostic stage) ─────────────────────────────
+    //
+    // BROKEN.md §6 explains why we're moving DoT capture off FlyText. The
+    // in-game combat log shows DoT ticks reliably regardless of pop-up text
+    // settings, and `IChatGui.ChatMessage` mirrors it. For now we just dump
+    // every chat message during an active session into the combat-log JSONL
+    // so the structure of a real Stormbite/Caustic Bite tick line is visible.
+    // Once we have a captured sample, we'll write the typed parser and route
+    // DoT damage through this path instead of FlyText.
+    private void OnChatMessage(Dalamud.Game.Chat.IHandleableChatMessage chat)
+    {
+        try
+        {
+            if (ActiveSession == null) return;
+
+            var type        = chat.LogKind;
+            var raw         = (uint)type;
+            var senderText  = chat.Sender?.TextValue ?? "";
+            var messageText = chat.Message?.TextValue ?? "";
+
+            // Compact payload-type list helps identify structure (e.g. is the
+            // damage value its own payload, is there a StatusPayload, etc.).
+            var sb = new System.Text.StringBuilder();
+            sb.Append('[');
+            bool first = true;
+            if (chat.Message != null)
+            {
+                foreach (var p in chat.Message.Payloads)
+                {
+                    if (!first) sb.Append(',');
+                    first = false;
+                    sb.Append('"').Append(p.Type).Append('"');
+                }
+            }
+            sb.Append(']');
+
+            _combatLog.Write(
+                "\"e\":\"chat\"," +
+                "\"type\":" + raw + "," +
+                "\"typeName\":\"" + CombatLog.Esc(type.ToString()) + "\"," +
+                "\"src\":" + (int)chat.SourceKind + "," +
+                "\"tgt\":" + (int)chat.TargetKind + "," +
+                "\"sender\":\"" + CombatLog.Esc(senderText) + "\"," +
+                "\"msg\":\"" + CombatLog.Esc(messageText) + "\"," +
+                "\"payloads\":" + sb);
+        }
+        catch (Exception ex) { _log.Error($"DamageMeter: Chat log capture failed — {ex.Message}"); }
+    }
+
     // ── Dispose ───────────────────────────────────────────────────────────────
     public void Dispose()
     {
         _framework.Update             -= OnFrameworkUpdate;
         _clientState.TerritoryChanged -= OnTerritoryChanged;
         _flyTextGui.FlyTextCreated    -= OnFlyTextCreated;
+        _chatGui.ChatMessage          -= OnChatMessage;
         if (ActiveSession != null) EndSession();
         _hook?.Dispose();
         _useActionHook?.Dispose();
